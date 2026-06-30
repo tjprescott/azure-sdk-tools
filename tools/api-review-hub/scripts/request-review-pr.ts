@@ -3,9 +3,9 @@ import type {
     ReviewPullRequestCreationAcceptedResponse,
     ReviewPullRequestCreationRequest,
 } from "../src/models/models.js";
+import { getAuthorization } from "./auth.js";
 
 const endpoint = (process.env.API_REVIEW_HUB_ENDPOINT ?? "https://api-review-hub-staging.azurewebsites.net").replace(/\/$/, "");
-const authorization = process.env.API_REVIEW_HUB_AUTHORIZATION ?? "Bearer local-test";
 const pollIntervalMs = Number(process.env.API_REVIEW_HUB_POLL_INTERVAL_MS ?? 5_000);
 
 const request: ReviewPullRequestCreationRequest = {
@@ -23,14 +23,15 @@ async function main(): Promise<void> {
     console.log(`Requesting API review PR from ${endpoint}`);
     console.log(JSON.stringify(request, null, 2));
 
-    const accepted = await postJson<ReviewPullRequestCreationAcceptedResponse>(`${endpoint}/api/review-prs`, request);
+    const authorization = await getAuthorization(endpoint);
+    const accepted = await postJson<ReviewPullRequestCreationAcceptedResponse>(`${endpoint}/api/review-prs`, request, authorization);
     console.log("Accepted operation:");
     console.log(JSON.stringify(accepted, null, 2));
 
     while (true) {
         await delay(pollIntervalMs);
 
-        const status = await getJson<OperationStatus>(`${endpoint}/api/operations/${accepted.operationId}`);
+        const status = await getJson<OperationStatus>(`${endpoint}/api/operations/${accepted.operationId}`, authorization);
         console.log(JSON.stringify(status, null, 2));
 
         if (status.status === "succeeded" || status.status === "failed") {
@@ -40,25 +41,30 @@ async function main(): Promise<void> {
     }
 }
 
-async function postJson<T>(url: string, body: unknown): Promise<T> {
+async function postJson<T>(url: string, body: unknown, authorization: string | undefined): Promise<T> {
     const response = await fetch(url, {
         method: "POST",
-        headers: {
-            authorization,
-            "content-type": "application/json",
-        },
+        headers: getHeaders(authorization, { "content-type": "application/json" }),
         body: JSON.stringify(body),
     });
 
     return readResponse<T>(response);
 }
 
-async function getJson<T>(url: string): Promise<T> {
+async function getJson<T>(url: string, authorization: string | undefined): Promise<T> {
     const response = await fetch(url, {
-        headers: { authorization },
+        headers: getHeaders(authorization),
     });
 
     return readResponse<T>(response);
+}
+
+function getHeaders(authorization: string | undefined, headers: Record<string, string> = {}): Record<string, string> {
+    if (authorization) {
+        headers.authorization = authorization;
+    }
+
+    return headers;
 }
 
 async function readResponse<T>(response: Response): Promise<T> {

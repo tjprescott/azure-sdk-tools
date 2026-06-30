@@ -16,9 +16,11 @@ COSMOS_DB_NAME: api-review-hub
 KEYVAULT_NAME: api-reviewhub-kv
 APP_CONFIGURATION_NAME: api-review-hub-appconfig
 
+ENTRA_APP_ID: "5fb7298a-3c43-4510-ae9b-d33306f4cd6c"
+ENTRA_APP_ID_URL: "api://apireviewhub-staging"
+
 # Non-secret settings copied into App Configuration. Leave blank until the
 # GitHub App and ADO caller model are finalized.
-ENTRA_CLIENT_ID: ""
 GITHUB_APP_ID: 1086291
 GITHUB_APP_KEYVAULT_URL: "https://azuresdkengkeyvault.vault.azure.net/"
 GITHUB_APP_KEY_NAME: "azure-sdk-automation"

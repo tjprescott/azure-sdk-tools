@@ -15,7 +15,8 @@ export async function getRequiredSetting(key: string): Promise<string> {
 }
 
 async function getSetting(key: string): Promise<string | undefined> {
-    const environmentValue = process.env[toEnvironmentVariableName(key)];
+    const environmentVariableName = toEnvironmentVariableName(key);
+    const environmentValue = process.env[environmentVariableName];
     if (environmentValue) {
         return environmentValue;
     }

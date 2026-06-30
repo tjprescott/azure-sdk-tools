@@ -51,6 +51,13 @@ export function createRouter(): Router {
                     if (route.auth === "azureIdentity") {
                         const authResult = await requireAzureIdentity(request);
                         if (!authResult.authenticated) {
+                            console.error(JSON.stringify({
+                                endpoint: `${method} ${url.pathname}`,
+                                authentication: "rejected",
+                                statusCode: authResult.statusCode ?? 401,
+                                code: authResult.code ?? "unauthorized",
+                                target: authResult.target,
+                            }));
                             sendError(
                                 response,
                                 authResult.statusCode ?? 401,

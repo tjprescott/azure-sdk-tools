@@ -10,7 +10,7 @@ let jwks: ReturnType<typeof createRemoteJWKSet> | undefined;
 
 interface AuthSettings {
     readonly tenantId: string;
-    readonly clientId: string;
+    readonly audiences: string[];
 }
 
 export interface AuthResult {
@@ -49,7 +49,6 @@ export async function requireAzureIdentity(request: IncomingMessage): Promise<Au
     try {
         settings = await getAuthSettings();
     } catch (error) {
-        console.error(`API Review Hub Entra authentication is not configured: ${error instanceof Error ? error.message : String(error)}`);
         return {
             authenticated: false,
             statusCode: 500,
@@ -63,7 +62,7 @@ export async function requireAzureIdentity(request: IncomingMessage): Promise<Au
         `https://login.microsoftonline.com/${settings.tenantId}/`,
         `https://sts.windows.net/${settings.tenantId}/`,
     ];
-    const audience = [settings.clientId, `api://${settings.clientId}`];
+    const audience = settings.audiences;
 
     try {
         const verified = await jwtVerify(token, getJwks(settings.tenantId), { audience, issuer });
@@ -78,7 +77,6 @@ export async function requireAzureIdentity(request: IncomingMessage): Promise<Au
 
         return { authenticated: true, claims: verified.payload };
     } catch (error) {
-        console.warn(`Rejected API Review Hub bearer token: ${error instanceof Error ? error.message : String(error)}`);
         return {
             authenticated: false,
             statusCode: 401,
@@ -104,15 +102,35 @@ function hasStringClaim(claims: JWTPayload, name: string): boolean {
 }
 
 async function getAuthSettings(): Promise<AuthSettings> {
-    authSettingsPromise ??= Promise.all([getRequiredSetting("tenant_id"), getRequiredSetting("entra_client_id")]).then(([tenantId, clientId]) => ({
-        tenantId,
-        clientId,
-    }));
+    if (!authSettingsPromise) {
+        authSettingsPromise = getRequiredSetting("tenant_id").then((tenantId) => {
+            const appId = getRequiredEnvironmentVariable("ENTRA_APP_ID");
+            const appIdUrl = getRequiredEnvironmentVariable("ENTRA_APP_ID_URL");
+            const audiences = [appId, appIdUrl];
+            return {
+                tenantId,
+                audiences,
+            };
+        });
+    }
 
     return authSettingsPromise;
 }
 
+function getRequiredEnvironmentVariable(name: string): string {
+    const value = process.env[name];
+    if (!value) {
+        throw new Error(`Missing required environment variable: ${name}`);
+    }
+
+    return value;
+}
+
 function getJwks(tenantId: string): ReturnType<typeof createRemoteJWKSet> {
-    jwks ??= createRemoteJWKSet(new URL(`https://login.microsoftonline.com/${tenantId}/discovery/v2.0/keys`));
+    if (!jwks) {
+        const jwksUrl = new URL(`https://login.microsoftonline.com/${tenantId}/discovery/v2.0/keys`);
+        jwks = createRemoteJWKSet(jwksUrl);
+    }
+
     return jwks;
 }
