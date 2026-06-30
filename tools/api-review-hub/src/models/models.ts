@@ -27,6 +27,13 @@ export interface ReviewPullRequestCreationAcceptedResponse {
 export interface OperationStatus {
     readonly operationId: string;
     readonly status: "accepted" | "running" | "succeeded" | "failed";
+    readonly mode?: "create" | "update";
+    readonly language?: string;
+    readonly packageName?: string;
+    readonly pipelineProject?: string;
+    readonly pipelineId?: string;
+    readonly buildId?: string;
+    readonly pipelineUrl?: string;
     readonly reviewPullRequest?: unknown;
     readonly failureReason?: string;
     readonly log?: string;

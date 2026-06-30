@@ -64,19 +64,23 @@ steps:
       package_relative_path=$(realpath --relative-to="$source_repo" "$package_dir")
 
       echo "Generating ${{ parameters.kind }} API review artifact from ${{ parameters.ref }}"
-      python -m azpysdk.main apistub --dest-dir "$package_dir" "${{ parameters.packageName }}"
-
-      if [ ! -f "$package_dir/api.md" ]; then
-        echo "Expected api.md was not generated at $package_dir/api.md" >&2
+      common_tasks_dir="$(Pipeline.Workspace)/apireview/python-tools/scripts/devops_tasks"
+      if [ ! -f "$common_tasks_dir/common_tasks.py" ]; then
+        echo "Expected Python SDK common_tasks.py was not found at $common_tasks_dir/common_tasks.py" >&2
         exit 1
       fi
-      if [ ! -f "$package_dir/api.metadata.yml" ]; then
-        echo "Expected api.metadata.yml was not generated at $package_dir/api.metadata.yml" >&2
+      (cd "$(Pipeline.Workspace)/apireview/python-tools" && PYTHONPATH="$common_tasks_dir${PYTHONPATH:+:$PYTHONPATH}" python -m azpysdk.main apistub --dest-dir "$output_dir" "$package_dir")
+
+      if [ ! -f "$output_dir/api.md" ]; then
+        echo "Expected api.md was not generated at $output_dir/api.md" >&2
+        find "$output_dir" -maxdepth 2 -type f -print >&2
         exit 1
       fi
-
-      cp "$package_dir/api.md" "$output_dir/api.md"
-      cp "$package_dir/api.metadata.yml" "$output_dir/api.metadata.yml"
+      if [ ! -f "$output_dir/api.metadata.yml" ]; then
+        echo "Expected api.metadata.yml was not generated at $output_dir/api.metadata.yml" >&2
+        find "$output_dir" -maxdepth 2 -type f -print >&2
+        exit 1
+      fi
 
       version=$(python -c 'import pathlib, re, sys; package_dir = pathlib.Path(sys.argv[1]); pattern = re.compile(r"^\s*VERSION\s*[:=]\s*[\"'"'"']([^\"'"'"']+)[\"'"'"']", re.MULTILINE); candidates = sorted(package_dir.rglob("*_version.py")) + sorted(package_dir.rglob("version.py")); match = next((pattern.search(candidate.read_text(encoding="utf-8")) for candidate in candidates if "_generated" not in candidate.parts and pattern.search(candidate.read_text(encoding="utf-8"))), None); print(match.group(1) if match else "")' "$package_dir")
       python -c 'import json, pathlib, sys; output_dir, mode, operation_id, repository, package_name, package_path, ref, version, kind = sys.argv[1:]; metadata = {"operationId": operation_id, "mode": mode, "language": "python", "repositoryFullName": repository, "packageName": package_name, "packageRelativePath": package_path, "ref": ref, "version": version, "kind": kind}; pathlib.Path(output_dir, "artifact-metadata.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")' "$output_dir" "${{ parameters.requestMode }}" "${{ parameters.operationId }}" "$repository_full_name" "${{ parameters.packageName }}" "$package_relative_path" "${{ parameters.ref }}" "$version" "${{ parameters.kind }}"

@@ -195,6 +195,21 @@ namespace ApiReviewHub {
       /** Current operation status. */
       status: "accepted" | "running" | "succeeded" | "failed";
 
+      /** Review request mode handled by the queued pipeline. */
+      mode?: OperationMode;
+
+      /** Package language or ecosystem handled by the queued pipeline. */
+      language?: string;
+
+      /** Package name handled by the queued pipeline. */
+      packageName?: string;
+
+      /** Azure DevOps build identifier associated with the operation. */
+      buildId?: string;
+
+      /** Azure DevOps run URL associated with the operation. */
+      pipelineUrl?: string;
+
       /** Created review pull request when the operation succeeds. */
       reviewPullRequest?: ReviewPullRequest;
 

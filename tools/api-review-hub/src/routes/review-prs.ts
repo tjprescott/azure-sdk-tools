@@ -1,7 +1,13 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 import type { OperationUpdate, ReviewPullRequestCreationRequest } from "../models/models.js";
-import { acceptOperationUpdate, acceptReviewPullRequestCreation, getOperation } from "../services/review-pr-service.js";
+import { AdoPipelineConfigurationError, AdoPipelineQueueError } from "../services/ado-pipeline-service.js";
+import {
+    OperationUpdateConflictError,
+    acceptOperationUpdate,
+    acceptReviewPullRequestCreation,
+    getOperation,
+} from "../services/review-pr-service.js";
 import { getString, isRecord, logRequest, readJsonBody, sendError, sendJson } from "./http.js";
 
 export async function handleRequestReviewPullRequestCreation(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -23,7 +29,33 @@ export async function handleRequestReviewPullRequestCreation(request: IncomingMe
         return;
     }
 
-    const operation = acceptReviewPullRequestCreation(body as ReviewPullRequestCreationRequest);
+    let operation;
+    try {
+        operation = await acceptReviewPullRequestCreation(body as ReviewPullRequestCreationRequest);
+    } catch (error) {
+        if (error instanceof AdoPipelineConfigurationError) {
+            console.error(JSON.stringify({
+                endpoint: "POST /api/review-prs",
+                error: error.name,
+                message: error.message,
+            }));
+            sendError(response, 500, "adoPipelineConfigurationMissing", "The Azure DevOps pipeline configuration is incomplete.");
+            return;
+        }
+
+        if (error instanceof AdoPipelineQueueError) {
+            console.error(JSON.stringify({
+                endpoint: "POST /api/review-prs",
+                error: error.name,
+                message: error.message,
+            }));
+            sendError(response, 502, "adoPipelineQueueFailed", "The Azure DevOps pipeline could not be queued.");
+            return;
+        }
+
+        throw error;
+    }
+
     sendJson(response, 202, operation);
 }
 
@@ -74,7 +106,18 @@ export async function handleAcceptOperationUpdate(
         return;
     }
 
-    const operation = acceptOperationUpdate(operationId, body as OperationUpdate);
+    let operation;
+    try {
+        operation = acceptOperationUpdate(operationId, body as OperationUpdate);
+    } catch (error) {
+        if (error instanceof OperationUpdateConflictError) {
+            sendError(response, 409, "operationUpdateConflict", "The operation update does not match the queued Azure DevOps pipeline run.");
+            return;
+        }
+
+        throw error;
+    }
+
     if (!operation) {
         sendError(response, 404, "operationNotFound", "The operation was not found.", "operationId");
         return;

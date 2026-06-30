@@ -15,9 +15,9 @@
     "create-review-pr": "tsx scripts/create-review-pr.ts",
     "request-review-pr": "tsx scripts/request-review-pr.ts",
     "infra:create": "tsx scripts/infra/create-resources.ts",
-    "infra:bootstrap": "tsx scripts/infra/bootstrap.ts",
+    "infra:bootstrap-cosmos": "tsx scripts/infra/bootstrap-cosmos.ts",
     "infra:grant-github-app-key-access": "tsx scripts/infra/grant-github-app-key-access.ts",
-    "infra:populate-appconfig": "tsx scripts/infra/populate-app-configuration.ts",
+    "infra:bootstrap-appconfig": "tsx scripts/infra/bootstrap-appconfig.ts",
     "infra:check": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

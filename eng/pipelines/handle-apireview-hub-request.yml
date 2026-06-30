@@ -4,6 +4,9 @@
 pr: none
 trigger: none
 
+variables:
+  callbackTokenAudience: 'api://apireviewhub-staging'
+
 parameters:
   - name: requestMode
     type: string
@@ -22,19 +25,13 @@ parameters:
     default: ''
   - name: baseRef
     type: string
-    default: ''
+    default: 'unused-for-update'
   - name: targetRef
     type: string
     default: ''
-  - name: apiReviewHubEndpoint
+  - name: completionCallbackUrl
     type: string
-    default: 'https://api-review-hub-staging.azurewebsites.net'
-  - name: completionCallbackAzureSubscription
-    type: string
-    default: ''
-  - name: completionCallbackResourceUrl
-    type: string
-    default: 'api://api-review-hub'
+    default: 'https://api-review-hub-staging.azurewebsites.net/api/operations/'
 
 jobs:
 # The language value is validated above. Each supported language must provide:
@@ -52,7 +49,7 @@ jobs:
           if ([string]::IsNullOrWhiteSpace('${{ parameters.packageName }}')) {
             throw 'packageName is required.'
           }
-          if ('${{ parameters.requestMode }}' -eq 'create' -and [string]::IsNullOrWhiteSpace('${{ parameters.baseRef }}')) {
+          if ('${{ parameters.requestMode }}' -eq 'create' -and ([string]::IsNullOrWhiteSpace('${{ parameters.baseRef }}') -or '${{ parameters.baseRef }}' -eq 'unused-for-update')) {
             throw 'baseRef is required for create requests.'
           }
           if ([string]::IsNullOrWhiteSpace('${{ parameters.targetRef }}')) {
@@ -185,25 +182,29 @@ jobs:
       # operation/run identity and downloads artifacts from ADO itself.
       - task: AzurePowerShell@5
         displayName: 'Notify API Review Hub of artifact completion'
-        condition: and(succeededOrFailed(), ne('${{ parameters.completionCallbackAzureSubscription }}', ''))
+        condition: succeededOrFailed()
         inputs:
-          azureSubscription: '${{ parameters.completionCallbackAzureSubscription }}'
+          azureSubscription: 'API Review Hub Staging'
           azurePowerShellVersion: latestVersion
           pwsh: true
           ScriptType: InlineScript
           Inline: |
             $ErrorActionPreference = 'Stop'
 
+            if ([string]::IsNullOrWhiteSpace('${{ parameters.completionCallbackUrl }}')) {
+              throw 'completionCallbackUrl is required.'
+            }
+
             try {
-              $tokenResponse = Get-AzAccessToken -ResourceUrl '${{ parameters.completionCallbackResourceUrl }}' -AsSecureString -ErrorAction Stop
+              $tokenResponse = Get-AzAccessToken -ResourceUrl '$(callbackTokenAudience)' -AsSecureString -ErrorAction Stop
             }
             catch {
-              throw "Failed to acquire access token for API Review Hub callback resource '${{ parameters.completionCallbackResourceUrl }}': $($_.Exception.Message)"
+              throw "Failed to acquire access token for API Review Hub callback audience '$(callbackTokenAudience)': $($_.Exception.Message)"
             }
 
             $secureToken = $tokenResponse.Token
             if (-not $secureToken) {
-              throw "Failed to acquire access token for API Review Hub callback resource '${{ parameters.completionCallbackResourceUrl }}'"
+              throw "Failed to acquire access token for API Review Hub callback audience '$(callbackTokenAudience)'"
             }
 
             $token = [System.Net.NetworkCredential]::new('', $secureToken).Password
@@ -231,8 +232,16 @@ jobs:
               $body.artifacts.base = 'apireview-base'
             }
 
-            $apiReviewHubEndpoint = '${{ parameters.apiReviewHubEndpoint }}'.TrimEnd('/')
-            $completionCallbackUrl = "$apiReviewHubEndpoint/api/operations/${{ parameters.operationId }}"
+            $completionCallbackUrl = '${{ parameters.completionCallbackUrl }}'
+            if ($completionCallbackUrl.EndsWith('/')) {
+              $completionCallbackUrl = "${completionCallbackUrl}${{ parameters.operationId }}"
+            }
+
+            $completionCallbackUri = $null
+            if (-not [System.Uri]::TryCreate($completionCallbackUrl, [System.UriKind]::Absolute, [ref] $completionCallbackUri)) {
+              throw "completionCallbackUrl '$completionCallbackUrl' is not a valid absolute URI."
+            }
+
             $headers = @{
               Authorization = "Bearer $token"
               'Content-Type' = 'application/json'
@@ -241,4 +250,4 @@ jobs:
 
             Write-Host "Completion callback URL: $completionCallbackUrl"
             Write-Host "Completion callback body: $jsonBody"
-            Invoke-WebRequest -Method POST -Uri $completionCallbackUrl -Headers $headers -Body $jsonBody -MaximumRetryCount 3 | Out-Null
+            Invoke-WebRequest -Method POST -Uri $completionCallbackUri -Headers $headers -Body $jsonBody -MaximumRetryCount 3 | Out-Null

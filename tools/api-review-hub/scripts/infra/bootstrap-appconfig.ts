@@ -15,12 +15,13 @@ async function main(): Promise<void> {
 
     await waitForAppConfigurationAccess(client, variables.appConfigurationName);
 
-    console.log(`Writing App Configuration settings: ${variables.appConfigurationName}`);
+    console.log(`Bootstrapping App Configuration settings: ${variables.appConfigurationName}`);
     for (const setting of variables.appConfigurationSettings) {
         await setAppConfigurationSetting(client, setting);
     }
+    await deleteUnusedAppConfigurationSettings(client, variables.appConfigurationSettings);
 
-    console.log(`Wrote App Configuration settings: ${variables.appConfigurationName}`);
+    console.log(`Bootstrapped App Configuration settings: ${variables.appConfigurationName}`);
 }
 
 async function waitForAppConfigurationAccess(client: AppConfigurationClient, appConfigurationName: string): Promise<void> {
@@ -66,6 +67,34 @@ async function setAppConfigurationSetting(client: AppConfigurationClient, settin
     }
 }
 
+async function deleteUnusedAppConfigurationSettings(
+    client: AppConfigurationClient,
+    desiredSettings: readonly AppConfigurationSetting[],
+): Promise<void> {
+    const desiredKeys = new Set(desiredSettings.map((setting) => setting.key));
+
+    for await (const setting of client.listConfigurationSettings({ labelFilter: "\0" })) {
+        if (!desiredKeys.has(setting.key)) {
+            await deleteAppConfigurationSetting(client, setting.key);
+        }
+    }
+}
+
+async function deleteAppConfigurationSetting(client: AppConfigurationClient, key: string): Promise<void> {
+    for (let attempt = 1; attempt <= appConfigurationWriteRetryCount; attempt++) {
+        try {
+            await client.deleteConfigurationSetting({ key });
+            console.log(`Deleted unused App Configuration setting: ${key}`);
+            return;
+        } catch (error) {
+            if (!isAuthorizationPropagationError(error) || attempt === appConfigurationWriteRetryCount) {
+                throw error;
+            }
+            await setTimeout(appConfigurationWriteRetryDelayMs);
+        }
+    }
+}
+
 function isAuthorizationPropagationError(error: unknown): boolean {
     return typeof error === "object" && error !== null && "statusCode" in error && (error.statusCode === 401 || error.statusCode === 403);
 }
@@ -91,6 +120,6 @@ function getErrorDescription(error: unknown): string {
 
 main().catch((error: unknown) => {
     const message = error instanceof Error ? error.message : String(error);
-    console.error(`Failed to populate API Review Hub App Configuration: ${message}`);
+    console.error(`Failed to bootstrap API Review Hub App Configuration: ${message}`);
     process.exitCode = 1;
 });

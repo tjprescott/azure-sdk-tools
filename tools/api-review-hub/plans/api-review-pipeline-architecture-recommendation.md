@@ -32,6 +32,7 @@ The web service should:
 - Receive API review requests.
 - Validate request shape, repository allowlists, package identity, and requested language.
 - Store request state in the service database.
+- Select the Azure DevOps project and pipeline definition for each endpoint workflow in service code; callers must not choose pipeline IDs or projects through public request bodies.
 - Trigger the orchestrator pipeline with parameters:
   - `operationId`
   - `packageName`
@@ -106,18 +107,12 @@ Callback-related pipeline parameters:
 
 ```yaml
 parameters:
-  - name: apiReviewHubEndpoint
+  - name: completionCallbackUrl
     type: string
-    default: 'https://api-review-hub-staging.azurewebsites.net'
-  - name: completionCallbackAzureSubscription
-    type: string
-    default: ''
-  - name: completionCallbackResourceUrl
-    type: string
-    default: 'api://api-review-hub'
+    default: 'https://api-review-hub-staging.azurewebsites.net/api/operations/'
 ```
 
-The callback step runs only when `completionCallbackAzureSubscription` is supplied. This lets local or experimental runs skip callback notification while production API Review Hub queueing can require that value. The pipeline posts to `{apiReviewHubEndpoint}/api/operations/{operationId}`. Staging defaults to `https://api-review-hub-staging.azurewebsites.net`; live can pass `https://api-review-hub.azurewebsites.net`.
+The callback step always runs after artifacts are published. API Review Hub passes a fully formed `completionCallbackUrl` such as `{webAppEndpoint}/api/operations/{operationId}` when it queues the pipeline. For manual runs, the default `completionCallbackUrl` is the staging operation URL prefix and the script appends `operationId`. The pipeline owns its Azure service connection and callback token audience configuration.
 
 Update requests intentionally generate only the target bundle. API Review Hub already knows it is updating an existing review workflow and can use the refreshed target artifact to update the review branch.
 
@@ -230,7 +225,7 @@ The pipeline should not create GitHub branches or PRs in the recommended securit
 
 ### Pipeline Completion Callback
 
-The pipeline should notify API Review Hub after the result artifact has been published. This should reuse the existing authenticated ADO-to-ARH callback pattern used for other API Review Hub status updates, such as release status updates. The current pipeline uses an `AzurePowerShell@5` step with a configured service connection, obtains an Entra token for `completionCallbackResourceUrl`, and posts to `{apiReviewHubEndpoint}/api/operations/{operationId}`.
+The pipeline should notify API Review Hub after the result artifact has been published. This should reuse the existing authenticated ADO-to-ARH callback pattern used for other API Review Hub status updates, such as release status updates. The current pipeline uses an `AzurePowerShell@5` step with a configured service connection, obtains an Entra token for the pipeline-owned callback token audience, and posts to the fully formed `completionCallbackUrl` supplied by API Review Hub.
 
 The callback should be a completion signal, not the artifact payload. It should include enough information for API Review Hub to locate and verify the run:
 
@@ -335,7 +330,7 @@ Questions to bring to security review:
 1. What exact ADO permissions are required for the API Review Hub managed identity to queue the orchestrator pipeline and read run artifacts?
 2. Should the service queue by pipeline definition ID, pipeline name, or a configured allowlisted mapping?
 3. How should ADO artifact access be scoped so one operation can only read its own generated artifacts?
-4. What final values should production use for `completionCallbackAzureSubscription` and `completionCallbackResourceUrl`?
+4. What final pipeline-owned callback token audience should production use?
 5. What replay protection and idempotency requirements apply to artifact completion callbacks?
 6. What audit events are required for pipeline trigger, callback receipt, artifact retrieval, branch update, PR creation, and reviewer assignment?
 

@@ -124,7 +124,6 @@ export async function loadVariables(path = process.env.VARIABLES_PATH ?? default
 
     const appConfigurationSettings: readonly AppConfigurationSetting[] = [
         { key: "environment_name", value: environmentName },
-        { key: "tenant_id", value: tenantId },
         { key: "app_configuration_endpoint", value: appConfigurationEndpoint },
         { key: "app_configuration_name", value: appConfigurationName },
         { key: "application_insights_name", value: applicationInsightsName },
@@ -134,8 +133,6 @@ export async function loadVariables(path = process.env.VARIABLES_PATH ?? default
         { key: "cosmos_containers", value: JSON.stringify(cosmosContainers.map((container) => container.name)) },
         { key: "keyvault_uri", value: keyVaultUri },
         { key: "keyvault_name", value: keyVaultName },
-        { key: "webapp_endpoint", value: webAppEndpoint },
-        { key: "webapp_name", value: webAppName },
         { key: "github_app_id", value: githubAppId },
         { key: "github_app_keyvault_url", value: githubAppKeyVaultUrl },
         { key: "github_app_key_name", value: githubAppKeyName },

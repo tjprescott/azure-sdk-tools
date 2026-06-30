@@ -2,7 +2,6 @@ import type { IncomingMessage } from "node:http";
 
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
 
-import { getRequiredSetting } from "../config/settings.js";
 import { getRequiredHeader } from "./http.js";
 
 let authSettingsPromise: Promise<AuthSettings> | undefined;
@@ -103,7 +102,8 @@ function hasStringClaim(claims: JWTPayload, name: string): boolean {
 
 async function getAuthSettings(): Promise<AuthSettings> {
     if (!authSettingsPromise) {
-        authSettingsPromise = getRequiredSetting("tenant_id").then((tenantId) => {
+        authSettingsPromise = Promise.resolve().then(() => {
+            const tenantId = getRequiredEnvironmentVariable("TENANT_ID");
             const appId = getRequiredEnvironmentVariable("ENTRA_APP_ID");
             const appIdUrl = getRequiredEnvironmentVariable("ENTRA_APP_ID_URL");
             const audiences = [appId, appIdUrl];
