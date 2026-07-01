@@ -13,6 +13,7 @@
     "check": "tsc -p tsconfig.json --noEmit",
     "deploy": "tsx scripts/deploy-app.ts",
     "create-review-pr": "tsx scripts/create-review-pr.ts",
+    "callback-operation": "tsx scripts/callback-operation.ts",
     "request-review-pr": "tsx scripts/request-review-pr.ts",
     "infra:create": "tsx scripts/infra/create-resources.ts",
     "infra:bootstrap-cosmos": "tsx scripts/infra/bootstrap-cosmos.ts",

@@ -114,7 +114,22 @@ export async function gitHubRequest<T>(
     authorizationScheme: "Bearer",
     options: RequestInit = {},
 ): Promise<T> {
-    const response = await fetch(url, {
+    const response = await gitHubFetch(url, token, authorizationScheme, options);
+
+    if (!response.ok) {
+        throw new Error(`GitHub API request failed with status ${response.status}: ${await response.text()}`);
+    }
+
+    return response.json() as Promise<T>;
+}
+
+export async function gitHubFetch(
+    url: string,
+    token: string,
+    authorizationScheme: "Bearer",
+    options: RequestInit = {},
+): Promise<Response> {
+    return fetch(url, {
         ...options,
         headers: {
             accept: "application/vnd.github+json",
@@ -125,12 +140,6 @@ export async function gitHubRequest<T>(
             ...options.headers,
         },
     });
-
-    if (!response.ok) {
-        throw new Error(`GitHub API request failed with status ${response.status}: ${await response.text()}`);
-    }
-
-    return response.json() as Promise<T>;
 }
 
 function base64UrlEncodeJson(value: unknown): string {

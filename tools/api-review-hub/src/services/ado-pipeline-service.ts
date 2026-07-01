@@ -1,8 +1,10 @@
 import { DefaultAzureCredential } from "@azure/identity";
+import AdmZip from "adm-zip";
 
 const azureDevOpsScope = "499b84ac-1321-427f-aa17-267ca6975798/.default";
 const azureDevOpsOrganizationUrl = "https://dev.azure.com/azure-sdk";
 const defaultAzureDevOpsProject = "internal";
+const defaultPipelineRefName = "refs/heads/arh/proofOfConcept";
 const credential = new DefaultAzureCredential();
 
 export type AdoPipelineTemplateParameters = Record<string, unknown>;
@@ -10,6 +12,7 @@ export type AdoPipelineTemplateParameters = Record<string, unknown>;
 export interface QueueAdoPipelineRequest {
     readonly project?: string;
     readonly pipelineId: string;
+    readonly pipelineRefName?: string;
     readonly templateParameters: AdoPipelineTemplateParameters;
 }
 
@@ -31,6 +34,11 @@ export interface QueueApiReviewPipelineRequest {
 
 export type QueueApiReviewPipelineResult = QueueAdoPipelineResult;
 
+export interface DownloadedAdoArtifact {
+    readonly name: string;
+    readonly files: ReadonlyMap<string, Buffer>;
+}
+
 const maxLoggedResponseBodyLength = 4000;
 
 interface AzureDevOpsRunResponse {
@@ -40,6 +48,13 @@ interface AzureDevOpsRunResponse {
         readonly web?: {
             readonly href?: string;
         };
+    };
+}
+
+interface AzureDevOpsBuildArtifactResponse {
+    readonly name?: string;
+    readonly resource?: {
+        readonly downloadUrl?: string;
     };
 }
 
@@ -102,6 +117,15 @@ export async function queueAdoPipeline(request: QueueAdoPipelineRequest): Promis
     const pipelineId = encodeURIComponent(request.pipelineId);
     const url = `${organizationUrl}/${project}/_apis/pipelines/${pipelineId}/runs?api-version=7.1`;
     const requestBody = {
+        resources: request.pipelineRefName
+            ? {
+                repositories: {
+                    self: {
+                        refName: request.pipelineRefName,
+                    },
+                },
+            }
+            : undefined,
         templateParameters: request.templateParameters,
     };
 
@@ -183,6 +207,7 @@ export async function queueAdoPipeline(request: QueueAdoPipelineRequest): Promis
 export async function queueApiReviewPipeline(request: QueueApiReviewPipelineRequest): Promise<QueueApiReviewPipelineResult> {
     const apiReviewHubEndpoint = getRequiredEnvironmentVariable("WEBAPP_ENDPOINT");
     const completionCallbackUrl = buildCompletionCallbackUrl(apiReviewHubEndpoint, request.operationId);
+    const pipelineRefName = getPipelineRefName();
 
     console.log(JSON.stringify({
         event: "apiReviewPipelineQueuePrepared",
@@ -196,11 +221,13 @@ export async function queueApiReviewPipeline(request: QueueApiReviewPipelineRequ
         targetRef: request.targetRef,
         apiReviewHubEndpoint,
         completionCallbackUrl,
+        pipelineRefName,
     }));
 
     return queueAdoPipeline({
         project: request.pipelineProject,
         pipelineId: request.pipelineId,
+        pipelineRefName,
         templateParameters: {
             requestMode: request.requestMode,
             language: request.language,
@@ -211,6 +238,77 @@ export async function queueApiReviewPipeline(request: QueueApiReviewPipelineRequ
             completionCallbackUrl,
         },
     });
+}
+
+export async function downloadBuildArtifact(project: string, buildId: string, artifactName: string): Promise<DownloadedAdoArtifact> {
+    const token = await getAzureDevOpsToken("adoArtifactTokenRequested", project, buildId, artifactName);
+    const organizationUrl = azureDevOpsOrganizationUrl.replace(/\/+$/, "");
+    const encodedProject = encodeURIComponent(project || defaultAzureDevOpsProject);
+    const url = `${organizationUrl}/${encodedProject}/_apis/build/builds/${encodeURIComponent(buildId)}/artifacts?artifactName=${encodeURIComponent(artifactName)}&api-version=7.1`;
+
+    console.log(JSON.stringify({
+        event: "adoArtifactMetadataRequest",
+        pipelineProject: project || defaultAzureDevOpsProject,
+        buildId,
+        artifactName,
+        url,
+    }));
+
+    const metadataResponse = await fetch(url, {
+        headers: {
+            authorization: `Bearer ${token.token}`,
+        },
+    });
+
+    if (!metadataResponse.ok) {
+        const responseBody = await readResponseBodyForLogging(metadataResponse);
+        throw new AdoPipelineQueueError(`Azure DevOps returned ${metadataResponse.status} ${metadataResponse.statusText} while reading artifact '${artifactName}' for build ${buildId}. Response body: ${responseBody}`);
+    }
+
+    const artifact = await metadataResponse.json() as AzureDevOpsBuildArtifactResponse;
+    const downloadUrl = artifact.resource?.downloadUrl;
+    if (!downloadUrl) {
+        throw new AdoPipelineQueueError(`Azure DevOps artifact '${artifactName}' for build ${buildId} did not include a download URL.`);
+    }
+
+    console.log(JSON.stringify({
+        event: "adoArtifactDownloadRequest",
+        pipelineProject: project || defaultAzureDevOpsProject,
+        buildId,
+        artifactName,
+    }));
+
+    const artifactResponse = await fetch(downloadUrl, {
+        headers: {
+            authorization: `Bearer ${token.token}`,
+        },
+    });
+
+    if (!artifactResponse.ok) {
+        const responseBody = await readResponseBodyForLogging(artifactResponse);
+        throw new AdoPipelineQueueError(`Azure DevOps returned ${artifactResponse.status} ${artifactResponse.statusText} while downloading artifact '${artifactName}' for build ${buildId}. Response body: ${responseBody}`);
+    }
+
+    const zip = new AdmZip(Buffer.from(await artifactResponse.arrayBuffer()));
+    const files = new Map<string, Buffer>();
+    for (const entry of zip.getEntries()) {
+        if (!entry.isDirectory) {
+            files.set(entry.entryName.replace(/\\/g, "/"), entry.getData());
+        }
+    }
+
+    console.log(JSON.stringify({
+        event: "adoArtifactDownloaded",
+        pipelineProject: project || defaultAzureDevOpsProject,
+        buildId,
+        artifactName,
+        fileCount: files.size,
+    }));
+
+    return {
+        name: artifact.name ?? artifactName,
+        files,
+    };
 }
 
 function buildCompletionCallbackUrl(apiReviewHubEndpoint: string, operationId: string): string {
@@ -225,6 +323,27 @@ function getRequiredEnvironmentVariable(name: string): string {
     }
 
     return value;
+}
+
+function getPipelineRefName(): string {
+    return process.env.API_REVIEW_HUB_PIPELINE_REF_NAME || defaultPipelineRefName;
+}
+
+async function getAzureDevOpsToken(event: string, project: string, buildId: string, artifactName: string): Promise<{ token: string; expiresOnTimestamp: number }> {
+    console.log(JSON.stringify({
+        event,
+        scope: azureDevOpsScope,
+        pipelineProject: project || defaultAzureDevOpsProject,
+        buildId,
+        artifactName,
+    }));
+
+    const token = await credential.getToken(azureDevOpsScope);
+    if (!token) {
+        throw new AdoPipelineQueueError("Failed to acquire an Azure DevOps access token.");
+    }
+
+    return token;
 }
 
 async function readResponseBodyForLogging(response: Response): Promise<string> {

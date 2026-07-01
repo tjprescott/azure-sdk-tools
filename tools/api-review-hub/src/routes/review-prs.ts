@@ -7,6 +7,7 @@ import {
     acceptOperationUpdate,
     acceptReviewPullRequestCreation,
     getOperation,
+    processOperationUpdateResults,
 } from "../services/review-pr-service.js";
 import { getString, isRecord, logRequest, readJsonBody, sendError, sendJson } from "./http.js";
 
@@ -119,11 +120,31 @@ export async function handleAcceptOperationUpdate(
     }
 
     if (!operation) {
-        sendError(response, 404, "operationNotFound", "The operation was not found.", "operationId");
+        console.warn(JSON.stringify({
+            endpoint: "POST /api/operations/{operationId}",
+            warning: "operationNotFound",
+            message: "The operation was not found. Accepting the callback without updating operation state.",
+            operationId,
+        }));
+        sendJson(response, 202, { operationId, status: "accepted" });
+        scheduleOperationUpdateProcessing(operationId, body as OperationUpdate);
         return;
     }
 
     sendJson(response, 202, operation);
+    scheduleOperationUpdateProcessing(operationId, body as OperationUpdate);
+}
+
+function scheduleOperationUpdateProcessing(operationId: string, update: OperationUpdate): void {
+    setImmediate(() => {
+        void processOperationUpdateResults(operationId, update).catch((error: unknown) => {
+            console.error(JSON.stringify({
+                event: "operationUpdateProcessingFailed",
+                operationId,
+                error: error instanceof Error ? error.message : String(error),
+            }));
+        });
+    });
 }
 
 function validateReviewPullRequestCreationRequest(value: unknown): { message: string; target: string } | undefined {

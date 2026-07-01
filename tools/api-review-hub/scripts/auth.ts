@@ -4,7 +4,6 @@ let tokenScope: string | undefined;
 
 export async function getAuthorization(endpoint: string): Promise<string | undefined> {
     const tokenScope = getTokenScope(endpoint);
-    console.log(`Requesting Entra token for API Review Hub scope ${tokenScope}.`);
     let token;
     try {
         token = await new DefaultAzureCredential().getToken(tokenScope);
