@@ -10,6 +10,8 @@ import type {
 } from "../models/models.js";
 import { publishApiReviewPullRequest } from "../github/repository-actions.js";
 import { downloadBuildArtifact, type DownloadedAdoArtifact, queueApiReviewPipeline } from "./ado-pipeline-service.js";
+import { upsertPackageVersion } from "./package-store.js";
+import { saveReviewPullRequestRecord } from "./review-pr-store.js";
 
 export interface ReviewPullRequestCreationResult {
     readonly reviewPullRequest: Record<string, unknown>;
@@ -194,6 +196,25 @@ export async function processOperationUpdateResults(operationId: string, update:
                 apiMd: targetArtifact.apiMd.toString("utf8"),
                 apiMetadataYaml: targetArtifact.apiMetadataYaml.toString("utf8"),
             },
+        });
+        const packageVersion = await upsertPackageVersion({
+            language: update.language,
+            packageName,
+            version: targetVersion,
+        });
+        await saveReviewPullRequestRecord({
+            packageVersionId: packageVersion.packageVersion.id,
+            operationId,
+            buildId: update.buildId,
+            language: update.language,
+            packageName,
+            packageRelativePath,
+            baseVersion,
+            targetVersion,
+            baseRef,
+            targetRef,
+            workingBranch: targetBranch,
+            reviewPullRequest,
         });
 
         operations.set(operationId, {

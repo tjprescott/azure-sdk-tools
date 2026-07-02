@@ -6,7 +6,16 @@ import { DefaultAzureCredential } from "@azure/identity";
 import { SecretClient, type KeyVaultSecret } from "@azure/keyvault-secrets";
 
 import { getRequiredSetting } from "../config/settings.js";
+import { isArchitectReviewerForPackage } from "../github/repository-actions.js";
 import type { RepositoryRegistration } from "../models/models.js";
+import {
+    findOpenReviewPullRequestsByWorkingBranch,
+    getReviewPullRequestRecord,
+    updateReviewPullRequestApprovalStatus,
+    updateReviewPullRequestStatus,
+    type ReviewPullRequestApprovalStatus,
+    type ReviewPullRequestStatus,
+} from "../services/review-pr-store.js";
 import { getRequiredHeader, logRequest, readRequestBody, sendEmpty, sendError } from "./http.js";
 
 interface GitHubWebhookPayload {
@@ -23,6 +32,16 @@ interface GitHubWebhookPayload {
     };
     readonly pull_request?: {
         readonly number?: number;
+        readonly state?: string;
+        readonly draft?: boolean;
+        readonly merged?: boolean;
+    };
+    readonly review?: {
+        readonly id?: number;
+        readonly state?: string;
+        readonly user?: {
+            readonly login?: string;
+        };
     };
     readonly issue?: {
         readonly number?: number;
@@ -180,6 +199,9 @@ export async function handleGitHubWebhookEvent(request: IncomingMessage, respons
         repository: decodedPayload.repository?.full_name,
         sender: decodedPayload.sender?.login,
         pullRequestNumber: decodedPayload.pull_request?.number,
+        reviewId: decodedPayload.review?.id,
+        reviewState: decodedPayload.review?.state,
+        reviewAuthor: decodedPayload.review?.user?.login,
         issueNumber: decodedPayload.issue?.number,
         commentId: decodedPayload.comment?.id,
         commentUrl: decodedPayload.comment?.html_url,
@@ -188,7 +210,248 @@ export async function handleGitHubWebhookEvent(request: IncomingMessage, respons
         ref: decodedPayload.ref,
     });
 
+    await processGitHubWebhookEvent(eventType, deliveryId, githubRepositoryId, decodedPayload);
+
     sendEmpty(response, 202);
+}
+
+async function processGitHubWebhookEvent(
+    eventType: string,
+    deliveryId: string,
+    githubRepositoryId: number,
+    payload: GitHubWebhookPayload,
+): Promise<void> {
+    switch (eventType) {
+        case "push":
+            await handlePushWebhookEvent(deliveryId, githubRepositoryId, payload);
+            return;
+        case "pull_request":
+            await handlePullRequestWebhookEvent(deliveryId, githubRepositoryId, payload);
+            return;
+        case "pull_request_review":
+            await handlePullRequestReviewWebhookEvent(deliveryId, githubRepositoryId, payload);
+            return;
+        default:
+            logRequest("POST /api/github/webhook-events ignored", {
+                reason: "unsupportedEventType",
+                eventType,
+                deliveryId,
+                githubRepositoryId,
+            });
+    }
+}
+
+async function handlePushWebhookEvent(deliveryId: string, githubRepositoryId: number, payload: GitHubWebhookPayload): Promise<void> {
+    const workingBranch = getBranchNameFromGitRef(payload.ref);
+    if (!workingBranch) {
+        logRequest("POST /api/github/webhook-events ignored", {
+            reason: "unsupportedPushRef",
+            eventType: "push",
+            deliveryId,
+            githubRepositoryId,
+            ref: payload.ref,
+        });
+        return;
+    }
+
+    const reviewPullRequests = await findOpenReviewPullRequestsByWorkingBranch(githubRepositoryId, workingBranch);
+    console.log(JSON.stringify({
+        event: "reviewPullRequestsMatchedForWorkingBranchPush",
+        deliveryId,
+        githubRepositoryId,
+        workingBranch,
+        reviewPullRequestCount: reviewPullRequests.length,
+        pullRequestNumbers: reviewPullRequests.map((reviewPullRequest) => reviewPullRequest.pullRequestNumber),
+    }));
+}
+
+async function handlePullRequestReviewWebhookEvent(deliveryId: string, githubRepositoryId: number, payload: GitHubWebhookPayload): Promise<void> {
+    const pullRequestNumber = payload.pull_request?.number;
+    const reviewer = payload.review?.user?.login;
+    if (!payload.action || !pullRequestNumber || !reviewer) {
+        logRequest("POST /api/github/webhook-events ignored", {
+            reason: "invalidPullRequestReviewPayload",
+            eventType: "pull_request_review",
+            deliveryId,
+            githubRepositoryId,
+            action: payload.action,
+            pullRequestNumber,
+            reviewId: payload.review?.id,
+            reviewState: payload.review?.state,
+            reviewer,
+        });
+        return;
+    }
+
+    const approvalStatus = getPullRequestReviewApprovalStatus(payload.action, payload.review?.state);
+    if (!approvalStatus) {
+        logRequest("POST /api/github/webhook-events ignored", {
+            reason: "unsupportedPullRequestReviewAction",
+            eventType: "pull_request_review",
+            deliveryId,
+            githubRepositoryId,
+            action: payload.action,
+            pullRequestNumber,
+            reviewId: payload.review?.id,
+            reviewState: payload.review?.state,
+            reviewer,
+        });
+        return;
+    }
+
+    const reviewPullRequest = await getReviewPullRequestRecord(githubRepositoryId, pullRequestNumber);
+    if (!reviewPullRequest) {
+        console.log(JSON.stringify({
+            event: "pullRequestReviewWebhookIgnoredForNonReviewPullRequest",
+            deliveryId,
+            githubRepositoryId,
+            action: payload.action,
+            pullRequestNumber,
+            reviewId: payload.review?.id,
+            reviewState: payload.review?.state,
+            reviewer,
+        }));
+        return;
+    }
+
+    const repository = parseRepositoryFullName(reviewPullRequest.repositoryFullName);
+    if (!repository) {
+        console.warn(JSON.stringify({
+            event: "pullRequestReviewWebhookIgnoredForInvalidRepositoryFullName",
+            deliveryId,
+            githubRepositoryId,
+            repositoryFullName: reviewPullRequest.repositoryFullName,
+            pullRequestNumber,
+            reviewId: payload.review?.id,
+            reviewer,
+        }));
+        return;
+    }
+
+    const reviewerIsArchitect = await isArchitectReviewerForPackage({
+        owner: repository.owner,
+        repo: repository.repo,
+        packageRelativePath: reviewPullRequest.packageRelativePath,
+        reviewer,
+    });
+    if (!reviewerIsArchitect) {
+        console.log(JSON.stringify({
+            event: "pullRequestReviewWebhookIgnoredForNonArchitectReviewer",
+            deliveryId,
+            githubRepositoryId,
+            action: payload.action,
+            pullRequestNumber,
+            reviewId: payload.review?.id,
+            reviewState: payload.review?.state,
+            reviewer,
+            packageRelativePath: reviewPullRequest.packageRelativePath,
+        }));
+        return;
+    }
+
+    const updatedRecord = await updateReviewPullRequestApprovalStatus(githubRepositoryId, pullRequestNumber, approvalStatus);
+    console.log(JSON.stringify({
+        event: updatedRecord ? "reviewPullRequestApprovalWebhookApplied" : "pullRequestReviewWebhookIgnoredForMissingReviewPullRequest",
+        deliveryId,
+        githubRepositoryId,
+        action: payload.action,
+        pullRequestNumber,
+        reviewId: payload.review?.id,
+        reviewState: payload.review?.state,
+        reviewer,
+        approvalStatus,
+    }));
+}
+
+async function handlePullRequestWebhookEvent(deliveryId: string, githubRepositoryId: number, payload: GitHubWebhookPayload): Promise<void> {
+    if (!payload.action || !payload.pull_request?.number) {
+        logRequest("POST /api/github/webhook-events ignored", {
+            reason: "invalidPullRequestPayload",
+            eventType: "pull_request",
+            deliveryId,
+            githubRepositoryId,
+            action: payload.action,
+            pullRequestNumber: payload.pull_request?.number,
+        });
+        return;
+    }
+
+    const pullRequestStatus = getPullRequestStatusFromWebhookPayload(payload.action, payload.pull_request);
+    if (!pullRequestStatus) {
+        logRequest("POST /api/github/webhook-events ignored", {
+            reason: "unsupportedPullRequestAction",
+            eventType: "pull_request",
+            deliveryId,
+            githubRepositoryId,
+            action: payload.action,
+            pullRequestNumber: payload.pull_request.number,
+        });
+        return;
+    }
+
+    const updatedRecord = await updateReviewPullRequestStatus(githubRepositoryId, payload.pull_request.number, pullRequestStatus);
+    console.log(JSON.stringify({
+        event: updatedRecord ? "reviewPullRequestWebhookApplied" : "pullRequestWebhookIgnoredForNonReviewPullRequest",
+        deliveryId,
+        githubRepositoryId,
+        action: payload.action,
+        pullRequestNumber: payload.pull_request.number,
+        pullRequestStatus,
+    }));
+}
+
+function getBranchNameFromGitRef(ref: string | undefined): string | undefined {
+    const prefix = "refs/heads/";
+    return ref?.startsWith(prefix) ? ref.slice(prefix.length) : undefined;
+}
+
+function getPullRequestStatusFromWebhookPayload(
+    action: string,
+    pullRequest: NonNullable<GitHubWebhookPayload["pull_request"]>,
+): ReviewPullRequestStatus | undefined {
+    if (action === "closed") {
+        return pullRequest.merged ? "merged" : "closed";
+    }
+
+    if (action === "converted_to_draft") {
+        return "draft";
+    }
+
+    if (action === "opened" || action === "reopened" || action === "ready_for_review" || action === "synchronize") {
+        return pullRequest.draft ? "draft" : "open";
+    }
+
+    if (pullRequest.state === "open") {
+        return pullRequest.draft ? "draft" : "open";
+    }
+
+    return undefined;
+}
+
+function getPullRequestReviewApprovalStatus(action: string, reviewState: string | undefined): ReviewPullRequestApprovalStatus | undefined {
+    const normalizedState = reviewState?.toLowerCase();
+
+    if (action === "dismissed" || normalizedState === "dismissed" || normalizedState === "stale") {
+        return "revoked";
+    }
+
+    if (action !== "submitted") {
+        return undefined;
+    }
+
+    switch (normalizedState) {
+        case "approved":
+            return "approved";
+        case "changes_requested":
+            return "rejected";
+        default:
+            return undefined;
+    }
+}
+
+function parseRepositoryFullName(repositoryFullName: string): { owner: string; repo: string } | undefined {
+    const [owner, repo] = repositoryFullName.split("/", 2);
+    return owner && repo ? { owner, repo } : undefined;
 }
 
 function logRejectedWebhookDelivery(
@@ -362,17 +625,16 @@ function isNotFound(error: unknown): boolean {
 
 async function getRepositoryRegistration(githubRepositoryId: number): Promise<RepositoryRegistration | undefined> {
     const container = await getRepositoryRegistrationsContainer();
-    const query = {
-        query: "SELECT TOP 2 * FROM c WHERE c.githubRepositoryId = @githubRepositoryId",
-        parameters: [{ name: "@githubRepositoryId", value: githubRepositoryId }],
-    };
-    const { resources } = await container.items.query<RepositoryRegistration>(query).fetchAll();
+    try {
+        const response = await container.item(String(githubRepositoryId), githubRepositoryId).read<RepositoryRegistration>();
+        return response.resource;
+    } catch (error) {
+        if (isNotFound(error)) {
+            return undefined;
+        }
 
-    if (resources.length > 1) {
-        throw new Error(`Found multiple repository registrations for GitHub repository ID ${githubRepositoryId}.`);
+        throw error;
     }
-
-    return resources[0];
 }
 
 async function getRepositoryRegistrationsContainer(): Promise<Container> {

@@ -81,11 +81,11 @@ const suffixedVariableNames = new Set<string>([
 const cosmosContainers: readonly CosmosContainerConfig[] = [
     { name: "adoOperations", partitionKeyPath: "/operationId" },
     { name: "services", partitionKeyPath: "/id" },
-    { name: "packages", partitionKeyPath: "/serviceId" },
+    { name: "packages", partitionKeyPath: "/language" },
     { name: "packageVersions", partitionKeyPath: "/packageId" },
-    { name: "reviewPullRequests", partitionKeyPath: "/packageVersionId" },
-    { name: "webhookEvents", partitionKeyPath: "/repositoryFullName" },
-    { name: "repositoryRegistrations", partitionKeyPath: "/repositoryFullName" },
+    { name: "reviewPullRequests", partitionKeyPath: "/githubRepositoryId" },
+    { name: "webhookEvents", partitionKeyPath: "/githubRepositoryId" },
+    { name: "repositoryRegistrations", partitionKeyPath: "/githubRepositoryId" },
 ];
 
 export async function loadVariables(path = process.env.VARIABLES_PATH ?? defaultVariablesPath): Promise<Variables> {

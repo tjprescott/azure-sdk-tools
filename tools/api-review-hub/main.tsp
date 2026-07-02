@@ -45,8 +45,12 @@ namespace ApiReviewHub {
       /** Package name within the language ecosystem. */
       packageName: string;
 
-      /** Versioned releases of this package. */
-      versions?: PackageVersion[];
+      /** Time this package record was created. */
+      createdOn?: offsetDateTime;
+
+      /** Time this package record was last updated. */
+      lastUpdatedOn?: offsetDateTime;
+
     }
 
     /** Specific versioned release of a package. */
@@ -54,8 +58,8 @@ namespace ApiReviewHub {
       /** Stable package version identifier. */
       id: Guid;
 
-      /** Package associated with this version. */
-      package: Package;
+      /** Stable package identifier associated with this version. */
+      packageId: Guid;
 
       /** Package version string. */
       version: string;
@@ -63,11 +67,17 @@ namespace ApiReviewHub {
       /** Whether this package version is stable or preview. */
       kind: PackageVersionKind;
 
+      /** Calculated approval decisions associated with this package version. */
+      approvals: ApprovalRecord[];
+
       /** Time this package version was released. */
       releasedOn?: offsetDateTime;
 
-      /** GitHub review pull requests associated with this package version. */
-      reviewPullRequests?: ReviewPullRequest[];
+      /** Time this package version record was created. */
+      createdOn?: offsetDateTime;
+
+      /** Time this package version record was last updated. */
+      lastUpdatedOn?: offsetDateTime;
     }
 
     /** Approval decision associated with a package version and API hash. */
@@ -93,9 +103,6 @@ namespace ApiReviewHub {
 
     /** GitHub pull request associated with API review for a package version. */
     model ReviewPullRequest {
-      /** Stable review pull request identifier. */
-      id: Guid;
-
       /** Package version associated with this review pull request. */
       packageVersion: PackageVersion;
 
@@ -125,6 +132,9 @@ namespace ApiReviewHub {
     model GitHubPullRequest {
       /** Repository containing the pull request. */
       repository: GitHubRepository;
+
+      /** Stable GitHub repository ID. */
+      githubRepositoryId: int64;
 
       /** Pull request number. */
       number: int32;
@@ -433,11 +443,12 @@ namespace ApiReviewHub {
       @body request: ReviewLookupRequest,
     ): ReviewPullRequest | ApiErrorResponse;
 
-    /** Gets a GitHub review pull request by identifier. */
-    @route("/review-prs/{reviewPullRequestId}")
+    /** Gets a GitHub review pull request by stable GitHub repository ID and pull request number. */
+    @route("/review-prs/{githubRepositoryId}/{pullRequestNumber}")
     @get
     op getReviewPullRequest(
-      @path reviewPullRequestId: Guid,
+      @path githubRepositoryId: int64,
+      @path pullRequestNumber: int32,
       @header("Authorization") authorization: string,
     ): ReviewPullRequest | ApiErrorResponse;
 

@@ -1,5 +1,8 @@
 import { getRepositoryInstallationToken, gitHubFetch, gitHubRequest } from "./github-app.js";
 
+const architectsFilePath = ".github/ARCHITECTS";
+const architectsFileRef = "main";
+
 export interface ApiReviewBranchFileSet {
     readonly packageRelativePath: string;
     readonly apiMd: string;
@@ -23,14 +26,27 @@ export interface PublishApiReviewPullRequestRequest {
 
 export interface PublishedApiReviewPullRequest {
     readonly repository: {
+        readonly id: number;
         readonly owner: string;
         readonly repo: string;
     };
     readonly number: number;
     readonly url: string;
-    readonly status: "open";
+    readonly status: "draft" | "open";
     readonly baseBranch: string;
     readonly reviewBranch: string;
+}
+
+export interface ArchitectReviewers {
+    readonly users: string[];
+    readonly teams: string[];
+}
+
+export interface IsArchitectReviewerForPackageOptions {
+    readonly owner: string;
+    readonly repo: string;
+    readonly packageRelativePath: string;
+    readonly reviewer: string;
 }
 
 interface GitHubRefResponse {
@@ -57,6 +73,12 @@ interface GitHubTreeResponse {
 interface GitHubPullRequestResponse {
     readonly number: number;
     readonly html_url: string;
+    readonly draft: boolean;
+    readonly base: {
+        readonly repo: {
+            readonly id: number;
+        };
+    };
 }
 
 interface GitHubContentResponse {
@@ -118,12 +140,13 @@ export async function publishApiReviewPullRequest(request: PublishApiReviewPullR
 
     return {
         repository: {
+            id: pullRequest.base.repo.id,
             owner: request.owner,
             repo: request.repo,
         },
         number: pullRequest.number,
         url: pullRequest.html_url,
-        status: "open",
+        status: pullRequest.draft ? "draft" : "open",
         baseBranch: request.baseBranch,
         reviewBranch: request.reviewBranch,
     };
@@ -138,7 +161,7 @@ async function applyReviewWorkflowMetadata(options: {
 }): Promise<void> {
     await addReviewNeededLabel(options.repositoryUrl, options.token, options.pullRequestNumber);
 
-    const reviewers = await resolveArchitectReviewers(options.repositoryUrl, options.token, options.targetBranch, options.packageRelativePath);
+    const reviewers = await resolveArchitectReviewers(options.repositoryUrl, options.token, options.packageRelativePath);
     if (reviewers.users.length === 0 && reviewers.teams.length === 0) {
         console.warn(JSON.stringify({
             event: "architectReviewersNotFound",
@@ -152,6 +175,66 @@ async function applyReviewWorkflowMetadata(options: {
     if (!reviewersRequested) {
         await addArchitectFallbackComment(options.repositoryUrl, options.token, options.pullRequestNumber, reviewers);
     }
+}
+
+export async function resolveArchitectReviewersForPackage(options: {
+    readonly owner: string;
+    readonly repo: string;
+    readonly packageRelativePath: string;
+}): Promise<ArchitectReviewers> {
+    const token = await getRepositoryInstallationToken(options.owner, options.repo);
+    const repositoryUrl = `https://api.github.com/repos/${options.owner}/${options.repo}`;
+    return resolveArchitectReviewers(repositoryUrl, token, options.packageRelativePath);
+}
+
+export async function isArchitectReviewerForPackage(options: IsArchitectReviewerForPackageOptions): Promise<boolean> {
+    const token = await getRepositoryInstallationToken(options.owner, options.repo);
+    const repositoryUrl = `https://api.github.com/repos/${options.owner}/${options.repo}`;
+    const reviewers = await resolveArchitectReviewers(repositoryUrl, token, options.packageRelativePath);
+    const reviewer = normalizeArchitectOwner(options.reviewer);
+
+    if (!reviewer) {
+        return false;
+    }
+
+    if (reviewers.users.some((user) => user.toLowerCase() === reviewer.toLowerCase())) {
+        return true;
+    }
+
+    for (const team of reviewers.teams) {
+        if (await isRepositoryOwnerTeamMember(options.owner, team, reviewer, token)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+async function isRepositoryOwnerTeamMember(owner: string, team: string, user: string, token: string): Promise<boolean> {
+    const response = await gitHubFetch(
+        `https://api.github.com/orgs/${encodeURIComponent(owner)}/teams/${encodeURIComponent(team)}/memberships/${encodeURIComponent(user)}`,
+        token,
+        "Bearer",
+    );
+
+    if (response.status === 404) {
+        return false;
+    }
+
+    if (!response.ok) {
+        console.warn(JSON.stringify({
+            event: "architectTeamMembershipCheckFailed",
+            owner,
+            team,
+            user,
+            status: response.status,
+            responseBody: await response.text(),
+        }));
+        return false;
+    }
+
+    const membership = await response.json() as { state?: string };
+    return membership.state === "active";
 }
 
 async function createArtifactCommit(options: {
@@ -323,10 +406,9 @@ async function ensureLabel(repositoryUrl: string, token: string, labelName: stri
 async function resolveArchitectReviewers(
     repositoryUrl: string,
     token: string,
-    targetBranch: string,
     packageRelativePath: string,
-): Promise<{ users: string[]; teams: string[] }> {
-    const architects = await readArchitectsFile(repositoryUrl, token, targetBranch);
+): Promise<ArchitectReviewers> {
+    const architects = await readArchitectsFile(repositoryUrl, token);
     if (!architects) {
         return { users: [], teams: [] };
     }
@@ -338,9 +420,9 @@ async function resolveArchitectReviewers(
     };
 }
 
-async function readArchitectsFile(repositoryUrl: string, token: string, targetBranch: string): Promise<string | undefined> {
-    const searchParameters = new URLSearchParams({ ref: toHeadsRef(targetBranch).replace(/^heads\//, "") });
-    const response = await gitHubFetch(`${repositoryUrl}/contents/.github/ARCHITECTS?${searchParameters}`, token, "Bearer");
+async function readArchitectsFile(repositoryUrl: string, token: string): Promise<string | undefined> {
+    const searchParameters = new URLSearchParams({ ref: architectsFileRef });
+    const response = await gitHubFetch(`${repositoryUrl}/contents/${architectsFilePath}?${searchParameters}`, token, "Bearer");
     if (response.status === 404) {
         return undefined;
     }
