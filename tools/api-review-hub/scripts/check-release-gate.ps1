@@ -23,9 +23,6 @@ if (!$PackageName) {
 if (!$PackageVersion) {
   $PackageVersion = "4.12.0b3"
 }
-if (!$ApiHash) {
-  $ApiHash = "aef97d024f2a340bd992eff0001471606f8270c8d35a69635de9fb50152b9e01"
-}
 
 $apiApprovalStatus = [PSCustomObject]@{
   IsApproved = $false

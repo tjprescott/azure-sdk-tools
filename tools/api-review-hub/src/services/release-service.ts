@@ -19,6 +19,14 @@ export async function evaluateReleaseGate(request: ReleaseGateRequest): Promise<
         };
     }
 
+    if (!request.apiHash) {
+        return {
+            allowed: false,
+            reason: "missingApiHash",
+            approval,
+        };
+    }
+
     if (approval.apiHash !== request.apiHash) {
         return {
             allowed: false,

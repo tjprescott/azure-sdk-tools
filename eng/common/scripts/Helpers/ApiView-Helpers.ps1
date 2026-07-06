@@ -33,7 +33,10 @@ function Check-ApiReviewStatus($packageName, $packageVersion, $language, $url, $
     Write-Warning "Skipping API review status check because language '$language' is not supported."
     return
   }
-  $headers = @{ "ApiKey" = $apiKey }
+  $headers = @{}
+  if ($apiKey) {
+    $headers["ApiKey"] = $apiKey
+  }
 
   if (!$apiApprovalStatus) {
     $apiApprovalStatus = [PSCustomObject]@{
@@ -50,7 +53,7 @@ function Check-ApiReviewStatus($packageName, $packageVersion, $language, $url, $
   }
 
   Write-Host ""
-  Write-Host "=== APIView release gate ==="
+  Write-Host "==APIView Status (Legacy)=="
   $apiViewApprovalDetails = "APIView release gate was not evaluated."
   $apiViewApproved = $false
   try
@@ -83,25 +86,18 @@ function Check-ApiReviewStatus($packageName, $packageVersion, $language, $url, $
     Write-Warning "Failed to check API review status for package $($PackageName). You can check http://aka.ms/azsdk/engsys/apireview/faq for more details on API Approval."
   }
 
-  if ($apiHash)
+  Write-Host ""
+  Write-Host "==APIReviewHub Status=="
+  $apiReviewHubApprovalStatus = Check-ApiReviewHubReleaseGate $packageName $packageVersion $language $apiHash $apiApprovalStatus $packageNameStatus
+
+  if (!$apiHash)
   {
-    Write-Host ""
-    Write-Host "=== API Review Hub release gate ==="
-    $apiReviewHubApprovalStatus = Check-ApiReviewHubReleaseGate $packageName $packageVersion $language $apiHash $apiApprovalStatus $packageNameStatus
-  }
-  else
-  {
-    Write-Host ""
-    Write-Host "=== API Review Hub release gate ==="
-    $apiReviewHubApprovalStatus = [PSCustomObject]@{
-      IsApproved = $false
-      Details = "Skipped: apiHash was not provided."
-    }
-    Write-Host $apiReviewHubApprovalStatus.Details
+    $apiApprovalStatus.IsApproved = $false
+    $apiApprovalStatus.Details = "API hash was not provided. Release gate approval requires a matching API hash."
   }
 
   Write-Host ""
-  Write-Host "=== Final release gate outcome ==="
+  Write-Host "==Resolved Result=="
   if ($apiApprovalStatus.IsApproved)
   {
     Write-Host "Result: Approved"
@@ -149,7 +145,7 @@ function Check-ApiReviewHubReleaseGate([string]$packageName, [string]$packageVer
       }
     }
 
-    $apiReviewHubDetails = "API Review Hub release gate is not approved for package $packageName. Reason: $($decision.reason)."
+    $apiReviewHubDetails = "API Review Hub release gate is not approved for package $packageName. Reason: $($decision.reason). $(Format-ApiReviewHubApprovalStatus $decision.approval)"
     Write-Host "API Review Hub approval: Not approved"
     Write-Host "API Review Hub details: $apiReviewHubDetails"
     return [PSCustomObject]@{
@@ -168,6 +164,30 @@ function Check-ApiReviewHubReleaseGate([string]$packageName, [string]$packageVer
   }
 }
 
+function Format-ApiReviewHubApprovalStatus($approval)
+{
+  if (!$approval)
+  {
+    return "No current approval status was returned."
+  }
+
+  $details = "Current approval status: $($approval.status)"
+  if ($approval.apiHash)
+  {
+    $details += " for API hash $($approval.apiHash)"
+  }
+  if ($approval.lastUpdatedBy)
+  {
+    $details += " by $($approval.lastUpdatedBy)"
+  }
+  if ($approval.lastUpdatedOn)
+  {
+    $details += " on $($approval.lastUpdatedOn)"
+  }
+
+  return "$details."
+}
+
 function New-ApiReviewHubReleaseGateUrl([string]$language, [string]$packageName, [string]$packageVersion, [string]$apiHash)
 {
   $baseUrl = $ApiReviewHubEndpoint.TrimEnd('/')
@@ -179,9 +199,14 @@ function New-ApiReviewHubReleaseGateUrl([string]$language, [string]$packageName,
   $query = @(
     "language=$([System.Net.WebUtility]::UrlEncode($language))",
     "packageName=$([System.Net.WebUtility]::UrlEncode($packageName))",
-    "version=$([System.Net.WebUtility]::UrlEncode($packageVersion))",
-    "apiHash=$([System.Net.WebUtility]::UrlEncode($apiHash))"
-  ) -join '&'
+    "version=$([System.Net.WebUtility]::UrlEncode($packageVersion))"
+  )
+  if ($apiHash)
+  {
+    $query += "apiHash=$([System.Net.WebUtility]::UrlEncode($apiHash))"
+  }
+
+  $query = $query -join '&'
   return "$baseUrl`?$query"
 }
 

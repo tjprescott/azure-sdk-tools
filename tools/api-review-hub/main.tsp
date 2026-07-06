@@ -272,7 +272,7 @@ namespace ApiReviewHub {
       allowed: boolean;
 
       /** Machine-readable decision reason. */
-      reason: "approved" | "missingApproval" | "rejected" | "unknownPackage" | "staleArtifact";
+      reason: "approved" | "missingApproval" | "rejected" | "unknownPackage" | "staleArtifact" | "missingApiHash";
 
       /** Most recent approval record. */
       approval: ApprovalRecord;
@@ -530,7 +530,7 @@ namespace ApiReviewHub {
       @query language: string,
       @query packageName: string,
       @query version: string,
-      @query apiHash: string,
+      @query apiHash?: string,
     ): ReleaseGateDecision | ApiErrorResponse;
 
     /** Marks a package version as released after the release gate succeeds. */

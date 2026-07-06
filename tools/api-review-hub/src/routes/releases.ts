@@ -6,16 +6,16 @@ import { getString, isRecord, logRequest, readJsonBody, sendEmpty, sendError, se
 
 export async function handleEvaluateReleaseGate(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
     const query = url.searchParams;
-    const language = query.get("language") ?? "";
-    const packageName = query.get("packageName") ?? "";
-    const version = query.get("version") ?? "";
-    const apiHash = query.get("apiHash") ?? "";
+    const language = query.get("language")?.trim() ?? "";
+    const packageName = query.get("packageName")?.trim() ?? "";
+    const version = query.get("version")?.trim() ?? "";
+    const apiHash = query.get("apiHash")?.trim() ?? "";
 
     logRequest("GET /api/releases/check-gate", {
         query: { language, packageName, version, apiHash },
     });
 
-    for (const [field, value] of Object.entries({ language, packageName, version, apiHash })) {
+    for (const [field, value] of Object.entries({ language, packageName, version })) {
         if (!value) {
             sendError(response, 400, "missingQueryParameter", `The ${field} query parameter is required.`, field);
             return;

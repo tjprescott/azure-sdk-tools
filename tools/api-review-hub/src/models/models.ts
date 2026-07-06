@@ -57,7 +57,7 @@ export interface OperationUpdate {
 
 export interface ReleaseGateDecision {
     readonly allowed: boolean;
-    readonly reason: "approved" | "missingApproval" | "rejected" | "unknownPackage" | "staleArtifact";
+    readonly reason: "approved" | "missingApproval" | "rejected" | "unknownPackage" | "staleArtifact" | "missingApiHash";
     readonly approval: ApprovalRecord;
 }
 
