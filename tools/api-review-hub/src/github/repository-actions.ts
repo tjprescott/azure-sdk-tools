@@ -58,6 +58,25 @@ export interface GetApiHashForPackageAtCommitOptions {
     readonly commitSha: string;
 }
 
+export interface ReviewPullRequestLabelOptions {
+    readonly owner: string;
+    readonly repo: string;
+    readonly pullRequestNumber: number;
+}
+
+export interface PublishUpdatedApiReviewArtifactsRequest {
+    readonly owner: string;
+    readonly repo: string;
+    readonly reviewBranch: string;
+    readonly packageName: string;
+    readonly files: ApiReviewBranchFileSet;
+}
+
+export interface PublishedUpdatedApiReviewArtifacts {
+    readonly changed: boolean;
+    readonly commitSha?: string;
+}
+
 interface GitHubRefResponse {
     readonly object: {
         readonly sha: string;
@@ -236,6 +255,46 @@ export async function getApiHashForPackageAtCommit(options: GetApiHashForPackage
     return apiHash;
 }
 
+export async function addReviewOutOfDateLabel(options: ReviewPullRequestLabelOptions): Promise<void> {
+    const token = await getRepositoryInstallationToken(options.owner, options.repo);
+    const repositoryUrl = `https://api.github.com/repos/${options.owner}/${options.repo}`;
+    await addLabel(repositoryUrl, token, options.pullRequestNumber, "review-out-of-date", "b60205", "API review artifacts are being regenerated for newer working branch changes.");
+}
+
+export async function removeReviewOutOfDateLabel(options: ReviewPullRequestLabelOptions): Promise<void> {
+    const token = await getRepositoryInstallationToken(options.owner, options.repo);
+    const repositoryUrl = `https://api.github.com/repos/${options.owner}/${options.repo}`;
+    await removeLabel(repositoryUrl, token, options.pullRequestNumber, "review-out-of-date");
+}
+
+export async function publishUpdatedApiReviewArtifacts(request: PublishUpdatedApiReviewArtifactsRequest): Promise<PublishedUpdatedApiReviewArtifacts> {
+    const token = await getRepositoryInstallationToken(request.owner, request.repo);
+    const repositoryUrl = `https://api.github.com/repos/${request.owner}/${request.repo}`;
+    const packageRelativePath = normalizePackageRelativePath(request.files.packageRelativePath);
+    const [currentApiMd, currentApiMetadataYaml] = await Promise.all([
+        readRepositoryFile(repositoryUrl, token, `${packageRelativePath}/api.md`, request.reviewBranch),
+        readRepositoryFile(repositoryUrl, token, `${packageRelativePath}/api.metadata.yml`, request.reviewBranch),
+    ]);
+
+    if (currentApiMd === request.files.apiMd && currentApiMetadataYaml === request.files.apiMetadataYaml) {
+        return { changed: false };
+    }
+
+    const reviewRef = await getRef(repositoryUrl, token, toHeadsRef(request.reviewBranch));
+    const reviewCommit = await gitHubRequest<GitHubCommitResponse>(`${repositoryUrl}/git/commits/${reviewRef.object.sha}`, token, "Bearer");
+    const updateCommit = await createArtifactCommit({
+        repositoryUrl,
+        token,
+        parentSha: reviewRef.object.sha,
+        baseTreeSha: reviewCommit.tree.sha,
+        message: `Update API review target for ${request.packageName}`,
+        files: request.files,
+    });
+    await upsertRef(repositoryUrl, token, request.reviewBranch, updateCommit.sha);
+
+    return { changed: true, commitSha: updateCommit.sha };
+}
+
 async function isRepositoryOwnerTeamMember(owner: string, team: string, user: string, token: string): Promise<boolean> {
     const response = await gitHubFetch(
         `https://api.github.com/orgs/${encodeURIComponent(owner)}/teams/${encodeURIComponent(team)}/memberships/${encodeURIComponent(user)}`,
@@ -394,8 +453,11 @@ async function getOrCreatePullRequest(options: {
 }
 
 async function addReviewNeededLabel(repositoryUrl: string, token: string, pullRequestNumber: number): Promise<void> {
-    const labelName = "architecture-review-needed";
-    await ensureLabel(repositoryUrl, token, labelName);
+    await addLabel(repositoryUrl, token, pullRequestNumber, "architecture-review-needed", "1d76db", "API architecture review is required.");
+}
+
+async function addLabel(repositoryUrl: string, token: string, pullRequestNumber: number, labelName: string, color: string, description: string): Promise<void> {
+    await ensureLabel(repositoryUrl, token, labelName, color, description);
     await gitHubRequest<unknown>(`${repositoryUrl}/issues/${pullRequestNumber}/labels`, token, "Bearer", {
         method: "POST",
         body: JSON.stringify({
@@ -404,7 +466,7 @@ async function addReviewNeededLabel(repositoryUrl: string, token: string, pullRe
     });
 }
 
-async function ensureLabel(repositoryUrl: string, token: string, labelName: string): Promise<void> {
+async function ensureLabel(repositoryUrl: string, token: string, labelName: string, color: string, description: string): Promise<void> {
     const labelResponse = await gitHubFetch(`${repositoryUrl}/labels/${encodeURIComponent(labelName)}`, token, "Bearer");
     if (labelResponse.ok) {
         return;
@@ -418,8 +480,8 @@ async function ensureLabel(repositoryUrl: string, token: string, labelName: stri
         method: "POST",
         body: JSON.stringify({
             name: labelName,
-            color: "1d76db",
-            description: "API architecture review is required.",
+            color,
+            description,
         }),
     });
     if (createResponse.ok || createResponse.status === 422) {
@@ -427,6 +489,17 @@ async function ensureLabel(repositoryUrl: string, token: string, labelName: stri
     }
 
     throw new Error(`GitHub API request failed with status ${createResponse.status}: ${await createResponse.text()}`);
+}
+
+async function removeLabel(repositoryUrl: string, token: string, pullRequestNumber: number, labelName: string): Promise<void> {
+    const response = await gitHubFetch(`${repositoryUrl}/issues/${pullRequestNumber}/labels/${encodeURIComponent(labelName)}`, token, "Bearer", {
+        method: "DELETE",
+    });
+    if (response.ok || response.status === 404) {
+        return;
+    }
+
+    throw new Error(`GitHub API request failed with status ${response.status}: ${await response.text()}`);
 }
 
 async function resolveArchitectReviewers(

@@ -15,7 +15,7 @@ const request: ReviewPullRequestCreationRequest = {
     targetBranch: {
         owner: "tjprescott",
         repo: "azure-sdk-for-python",
-        name: "main",
+        name: "KeyVaultChange",
     },
 };
 

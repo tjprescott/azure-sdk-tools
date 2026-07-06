@@ -6,7 +6,7 @@ import { DefaultAzureCredential } from "@azure/identity";
 import { SecretClient, type KeyVaultSecret } from "@azure/keyvault-secrets";
 
 import { getRequiredSetting } from "../config/settings.js";
-import { getApiHashForPackageAtCommit, isArchitectReviewerForPackage } from "../github/repository-actions.js";
+import { addReviewOutOfDateLabel, getApiHashForPackageAtCommit, isArchitectReviewerForPackage } from "../github/repository-actions.js";
 import type { RepositoryRegistration } from "../models/models.js";
 import {
     findOpenReviewPullRequestsByWorkingBranch,
@@ -16,6 +16,7 @@ import {
     type ApprovalStatus,
     type ReviewPullRequestStatus,
 } from "../services/review-pr-store.js";
+import { acceptReviewPullRequestUpdate } from "../services/review-pr-service.js";
 import { getRequiredHeader, logRequest, readRequestBody, sendEmpty, sendError } from "./http.js";
 
 interface GitHubWebhookPayload {
@@ -56,6 +57,17 @@ interface GitHubWebhookPayload {
         };
     };
     readonly ref?: string;
+    readonly before?: string;
+    readonly after?: string;
+    readonly head_commit?: GitHubPushCommit;
+    readonly commits?: GitHubPushCommit[];
+}
+
+interface GitHubPushCommit {
+    readonly id?: string;
+    readonly added?: string[];
+    readonly modified?: string[];
+    readonly removed?: string[];
 }
 
 interface WebhookSecretKey {
@@ -255,15 +267,68 @@ async function handlePushWebhookEvent(deliveryId: string, githubRepositoryId: nu
         return;
     }
 
+    const changedFiles = getChangedFilesFromPushPayload(payload);
+    const changedPackageNames = getChangedPackageNames(changedFiles);
+    if (changedPackageNames.size === 0) {
+        logRequest("POST /api/github/webhook-events ignored", {
+            reason: "noSdkPackagesChanged",
+            eventType: "push",
+            deliveryId,
+            githubRepositoryId,
+            workingBranch,
+            before: payload.before,
+            after: payload.after,
+            changedFileCount: changedFiles.length,
+        });
+        return;
+    }
+
     const reviewPullRequests = await findOpenReviewPullRequestsByWorkingBranch(githubRepositoryId, workingBranch);
+    const matchingReviewPullRequests = reviewPullRequests.filter((reviewPullRequest) => changedPackageNames.has(reviewPullRequest.packageName));
     console.log(JSON.stringify({
         event: "reviewPullRequestsMatchedForWorkingBranchPush",
         deliveryId,
         githubRepositoryId,
         workingBranch,
+        before: payload.before,
+        after: payload.after,
+        changedPackageNames: [...changedPackageNames],
         reviewPullRequestCount: reviewPullRequests.length,
-        pullRequestNumbers: reviewPullRequests.map((reviewPullRequest) => reviewPullRequest.pullRequestNumber),
+        matchingReviewPullRequestCount: matchingReviewPullRequests.length,
+        pullRequestNumbers: matchingReviewPullRequests.map((reviewPullRequest) => reviewPullRequest.pullRequestNumber),
     }));
+
+    const targetRef = payload.after || workingBranch;
+    for (const reviewPullRequest of matchingReviewPullRequests) {
+        const repository = parseRepositoryFullName(reviewPullRequest.repositoryFullName);
+        if (!repository) {
+            console.warn(JSON.stringify({
+                event: "reviewPullRequestUpdateSkippedForInvalidRepositoryFullName",
+                deliveryId,
+                githubRepositoryId,
+                repositoryFullName: reviewPullRequest.repositoryFullName,
+                pullRequestNumber: reviewPullRequest.pullRequestNumber,
+            }));
+            continue;
+        }
+
+        await addReviewOutOfDateLabel({
+            owner: repository.owner,
+            repo: repository.repo,
+            pullRequestNumber: reviewPullRequest.pullRequestNumber,
+        });
+        const acceptedUpdate = await acceptReviewPullRequestUpdate(reviewPullRequest, targetRef);
+        console.log(JSON.stringify({
+            event: "reviewPullRequestUpdateQueuedForPush",
+            deliveryId,
+            githubRepositoryId,
+            workingBranch,
+            targetRef,
+            packageName: reviewPullRequest.packageName,
+            pullRequestNumber: reviewPullRequest.pullRequestNumber,
+            operationId: acceptedUpdate.operationId,
+        }));
+    }
 }
 
 async function handlePullRequestReviewWebhookEvent(deliveryId: string, githubRepositoryId: number, payload: GitHubWebhookPayload): Promise<void> {
@@ -418,6 +483,32 @@ async function handlePullRequestWebhookEvent(deliveryId: string, githubRepositor
 function getBranchNameFromGitRef(ref: string | undefined): string | undefined {
     const prefix = "refs/heads/";
     return ref?.startsWith(prefix) ? ref.slice(prefix.length) : undefined;
+}
+
+function getChangedFilesFromPushPayload(payload: GitHubWebhookPayload): string[] {
+    const files = new Set<string>();
+    const commits = payload.commits?.length ? payload.commits : payload.head_commit ? [payload.head_commit] : [];
+    for (const commit of commits) {
+        for (const file of [...commit.added ?? [], ...commit.modified ?? [], ...commit.removed ?? []]) {
+            if (file) {
+                files.add(file.replace(/\\/g, "/"));
+            }
+        }
+    }
+
+    return [...files];
+}
+
+function getChangedPackageNames(files: string[]): Set<string> {
+    const packageNames = new Set<string>();
+    for (const file of files) {
+        const segments = file.split("/").filter((segment) => segment.length > 0);
+        if (segments.length >= 3 && segments[0] === "sdk") {
+            packageNames.add(segments[2]);
+        }
+    }
+
+    return packageNames;
 }
 
 function getPullRequestStatusFromWebhookPayload(

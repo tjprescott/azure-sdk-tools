@@ -12,6 +12,7 @@
     "dev": "tsx src/server.ts",
     "check": "tsc -p tsconfig.json --noEmit",
     "deploy": "tsx scripts/deploy-app.ts",
+    "check-release": "tsx scripts/check-release.ts",
     "create-review-pr": "tsx scripts/create-review-pr.ts",
     "callback-operation": "tsx scripts/callback-operation.ts",
     "request-review-pr": "tsx scripts/request-review-pr.ts",

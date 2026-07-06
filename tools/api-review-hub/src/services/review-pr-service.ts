@@ -8,10 +8,10 @@ import type {
     ReviewPullRequestCreationAcceptedResponse,
     ReviewPullRequestCreationRequest,
 } from "../models/models.js";
-import { publishApiReviewPullRequest } from "../github/repository-actions.js";
+import { publishApiReviewPullRequest, publishUpdatedApiReviewArtifacts, removeReviewOutOfDateLabel } from "../github/repository-actions.js";
 import { downloadBuildArtifact, type DownloadedAdoArtifact, queueApiReviewPipeline } from "./ado-pipeline-service.js";
 import { upsertPackageVersion } from "./package-store.js";
-import { saveReviewPullRequestRecord } from "./review-pr-store.js";
+import { saveReviewPullRequestRecord, type ReviewPullRequestRecord } from "./review-pr-store.js";
 
 export interface ReviewPullRequestCreationResult {
     readonly reviewPullRequest: Record<string, unknown>;
@@ -23,8 +23,19 @@ export interface ReviewPullRequestCreationOptions {
     readonly onLog?: (message: string) => void;
 }
 
+export interface ReviewPullRequestUpdateAcceptedResponse {
+    readonly operationId: string;
+    readonly status: "accepted";
+}
+
+interface ReviewPullRequestUpdateRequest {
+    readonly reviewPullRequest: ReviewPullRequestRecord;
+    readonly targetRef: string;
+}
+
 const operations = new Map<string, OperationStatus>();
 const operationRequests = new Map<string, ReviewPullRequestCreationRequest>();
+const operationUpdateRequests = new Map<string, ReviewPullRequestUpdateRequest>();
 
 export class OperationUpdateConflictError extends Error {
     public constructor(message: string) {
@@ -90,6 +101,66 @@ export async function acceptReviewPullRequestCreation(
     return { operationId, status: "accepted" };
 }
 
+export async function acceptReviewPullRequestUpdate(
+    reviewPullRequest: ReviewPullRequestRecord,
+    targetRef: string,
+): Promise<ReviewPullRequestUpdateAcceptedResponse> {
+    const operationId = randomUUID();
+    const pipelineProject = "playground";
+    const pipelineId = "8259";
+
+    console.log(JSON.stringify({
+        event: "apiReviewPipelineQueueRequested",
+        operationId,
+        pipelineProject,
+        pipelineId,
+        requestMode: "update",
+        language: reviewPullRequest.language,
+        packageName: reviewPullRequest.packageName,
+        baseRef: reviewPullRequest.baseRef,
+        targetRef,
+        pullRequestNumber: reviewPullRequest.pullRequestNumber,
+        reviewBranch: reviewPullRequest.reviewBranch,
+    }));
+
+    const queuedRun = await queueApiReviewPipeline({
+        operationId,
+        pipelineProject,
+        pipelineId,
+        requestMode: "update",
+        language: reviewPullRequest.language,
+        packageName: reviewPullRequest.packageName,
+        baseRef: reviewPullRequest.baseRef,
+        targetRef,
+    });
+
+    console.log(JSON.stringify({
+        event: "apiReviewPipelineQueued",
+        operationId,
+        pipelineProject,
+        pipelineId,
+        buildId: queuedRun.buildId,
+        runUrl: queuedRun.runUrl,
+        requestMode: "update",
+        pullRequestNumber: reviewPullRequest.pullRequestNumber,
+    }));
+
+    operations.set(operationId, {
+        operationId,
+        status: "running",
+        mode: "update",
+        language: reviewPullRequest.language,
+        packageName: reviewPullRequest.packageName,
+        pipelineProject,
+        pipelineId,
+        buildId: queuedRun.buildId,
+        pipelineUrl: queuedRun.runUrl,
+    });
+    operationUpdateRequests.set(operationId, { reviewPullRequest, targetRef });
+
+    return { operationId, status: "accepted" };
+}
+
 export function getOperation(operationId: string): OperationStatus | undefined {
     return operations.get(operationId);
 }
@@ -146,8 +217,13 @@ export async function processOperationUpdateResults(operationId: string, update:
         const resultSummary = await downloadResultSummary(update.project, update.buildId, update.artifacts.result);
         verifyResultSummary(operationId, update, resultSummary);
 
+        if (update.mode === "update") {
+            await processReviewPullRequestUpdateResults(operationId, update, resultSummary);
+            return;
+        }
+
         if (update.mode !== "create") {
-            throw new Error(`Operation mode '${update.mode}' is not implemented for review PR publishing yet.`);
+            throw new Error(`Unsupported operation mode '${update.mode}'.`);
         }
 
         const artifactNames = getRequiredCreateArtifactNames(update.artifacts);
@@ -254,6 +330,74 @@ export async function processOperationUpdateResults(operationId: string, update:
     }
 }
 
+async function processReviewPullRequestUpdateResults(operationId: string, update: OperationUpdate, resultSummary: ResultSummary): Promise<void> {
+    const updateRequest = operationUpdateRequests.get(operationId);
+    if (!updateRequest) {
+        throw new Error(`Update operation '${operationId}' did not have an associated review pull request.`);
+    }
+
+    const reviewPullRequest = updateRequest.reviewPullRequest;
+    const repository = parseRepositoryFullName(reviewPullRequest.repositoryFullName);
+    try {
+        const targetArtifactName = getRequiredUpdateArtifactName(update.artifacts);
+        const targetArtifact = await downloadApiArtifact(update.project, update.buildId, targetArtifactName);
+        const packageRelativePath = getRequiredString(
+            resultSummary.packageRelativePath ?? targetArtifact.metadata.packageRelativePath ?? reviewPullRequest.packageRelativePath,
+            "result-summary.packageRelativePath",
+        );
+        const publishedUpdate = await publishUpdatedApiReviewArtifacts({
+            owner: repository.owner,
+            repo: repository.repo,
+            reviewBranch: reviewPullRequest.reviewBranch,
+            packageName: reviewPullRequest.packageName,
+            files: {
+                packageRelativePath,
+                apiMd: targetArtifact.apiMd.toString("utf8"),
+                apiMetadataYaml: targetArtifact.apiMetadataYaml.toString("utf8"),
+            },
+        });
+
+        operations.set(operationId, {
+            ...operations.get(operationId),
+            operationId,
+            status: "succeeded",
+            mode: update.mode,
+            language: update.language,
+            packageName: reviewPullRequest.packageName,
+            pipelineProject: update.project,
+            buildId: update.buildId,
+            reviewPullRequest: {
+                pullRequestNumber: reviewPullRequest.pullRequestNumber,
+                reviewBranch: reviewPullRequest.reviewBranch,
+                changed: publishedUpdate.changed,
+                commitSha: publishedUpdate.commitSha,
+            },
+            failureReason: undefined,
+        });
+
+        console.log(JSON.stringify({
+            event: publishedUpdate.changed ? "reviewPullRequestUpdatePublished" : "reviewPullRequestUpdateNoChanges",
+            operationId,
+            buildId: update.buildId,
+            pullRequestNumber: reviewPullRequest.pullRequestNumber,
+            reviewBranch: reviewPullRequest.reviewBranch,
+            changed: publishedUpdate.changed,
+            commitSha: publishedUpdate.commitSha,
+        }));
+    } finally {
+        await removeReviewOutOfDateLabel({
+            owner: repository.owner,
+            repo: repository.repo,
+            pullRequestNumber: reviewPullRequest.pullRequestNumber,
+        });
+        console.log(JSON.stringify({
+            event: "reviewPullRequestOutOfDateLabelRemoved",
+            operationId,
+            pullRequestNumber: reviewPullRequest.pullRequestNumber,
+        }));
+    }
+}
+
 interface ResultSummary {
     readonly operationId?: string;
     readonly mode?: string;
@@ -348,6 +492,14 @@ function getRequiredCreateArtifactNames(artifacts: OperationArtifactNames): { ba
     };
 }
 
+function getRequiredUpdateArtifactName(artifacts: OperationArtifactNames): string {
+    if (!artifacts.target) {
+        throw new Error("Update operation callback did not include artifacts.target.");
+    }
+
+    return artifacts.target;
+}
+
 function resolveRepository(operationId: string, resultSummary: ResultSummary): { owner: string; repo: string } {
     const targetBranch = operationRequests.get(operationId)?.targetBranch;
     if (targetBranch) {
@@ -361,6 +513,15 @@ function resolveRepository(operationId: string, resultSummary: ResultSummary): {
     const [owner, repo] = repositoryFullName.split("/", 2);
     if (!owner || !repo) {
         throw new Error(`Result summary repositoryFullName '${repositoryFullName}' was not in owner/repo format.`);
+    }
+
+    return { owner, repo };
+}
+
+function parseRepositoryFullName(repositoryFullName: string): { owner: string; repo: string } {
+    const [owner, repo] = repositoryFullName.split("/", 2);
+    if (!owner || !repo) {
+        throw new Error(`Review PR repositoryFullName '${repositoryFullName}' was not in owner/repo format.`);
     }
 
     return { owner, repo };
