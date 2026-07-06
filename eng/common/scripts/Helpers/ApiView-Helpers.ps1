@@ -1,5 +1,8 @@
 . ${PSScriptRoot}\..\logging.ps1
 
+$ApiReviewHubEndpoint = "https://api-review-hub-staging.azurewebsites.net"
+$ApiReviewHubResource = "api://apireviewhub-staging"
+
 function MapLanguageToRequestParam($language)
 {
     $lang = $language
@@ -22,12 +25,12 @@ function MapLanguageToRequestParam($language)
     return $lang
 }
 
-function Check-ApiReviewStatus($packageName, $packageVersion, $language, $url, $apiKey, $apiApprovalStatus = $null, $packageNameStatus = $null)
+function Check-ApiReviewStatus($packageName, $packageVersion, $language, $url, $apiKey, $apiApprovalStatus = $null, $packageNameStatus = $null, [string]$apiHash = $null)
 {
-  # Get API view URL and API Key to check status
   Write-Host "Checking API review status for package: ${packageName}"
   $lang = MapLanguageToRequestParam -language $language
   if ($lang -eq $null) {
+    Write-Warning "Skipping API review status check because language '$language' is not supported."
     return
   }
   $headers = @{ "ApiKey" = $apiKey }
@@ -46,6 +49,10 @@ function Check-ApiReviewStatus($packageName, $packageVersion, $language, $url, $
     }
   }
 
+  Write-Host ""
+  Write-Host "=== APIView release gate ==="
+  $apiViewApprovalDetails = "APIView release gate was not evaluated."
+  $apiViewApproved = $false
   try
   {
     $requestUrl = "${url}?language=${lang}&packageName=${packageName}&packageVersion=${packageVersion}"
@@ -53,23 +60,140 @@ function Check-ApiReviewStatus($packageName, $packageVersion, $language, $url, $
     $response = Invoke-WebRequest $requestUrl -Method 'GET' -Headers $headers
     Write-Host "Response: $($response.StatusCode)"
     Process-ReviewStatusCode -statusCode $response.StatusCode -packageName $packageName -apiApprovalStatus $apiApprovalStatus -packageNameStatus $packageNameStatus
+    $apiViewApproved = $apiApprovalStatus.IsApproved
+    $apiViewApprovalDetails = $apiApprovalStatus.Details
     if ($apiApprovalStatus.IsApproved) {
-      Write-Host $($apiApprovalStatus.Details)
+      Write-Host "APIView API approval: Approved"
     }
     else {
-      Write-warning $($apiApprovalStatus.Details)
+      Write-Host "APIView API approval: Not approved"
     }
+    Write-Host "APIView API approval details: $($apiApprovalStatus.Details)"
+
     if ($packageNameStatus.IsApproved) {
-      Write-Host $($packageNameStatus.Details)
+      Write-Host "APIView package name approval: Approved"
     }
     else {
-      Write-warning $($packageNameStatus.Details)
+      Write-Host "APIView package name approval: Not approved"
     }
+    Write-Host "APIView package name approval details: $($packageNameStatus.Details)"
   }
   catch
   {
     Write-Warning "Failed to check API review status for package $($PackageName). You can check http://aka.ms/azsdk/engsys/apireview/faq for more details on API Approval."
   }
+
+  if ($apiHash)
+  {
+    Write-Host ""
+    Write-Host "=== API Review Hub release gate ==="
+    $apiReviewHubApprovalStatus = Check-ApiReviewHubReleaseGate $packageName $packageVersion $language $apiHash $apiApprovalStatus $packageNameStatus
+  }
+  else
+  {
+    Write-Host ""
+    Write-Host "=== API Review Hub release gate ==="
+    $apiReviewHubApprovalStatus = [PSCustomObject]@{
+      IsApproved = $false
+      Details = "Skipped: apiHash was not provided."
+    }
+    Write-Host $apiReviewHubApprovalStatus.Details
+  }
+
+  Write-Host ""
+  Write-Host "=== Final release gate outcome ==="
+  if ($apiApprovalStatus.IsApproved)
+  {
+    Write-Host "Result: Approved"
+    if ($apiViewApproved)
+    {
+      Write-Host "Approved by: APIView"
+      Write-Host "APIView: $apiViewApprovalDetails"
+    }
+    elseif ($apiReviewHubApprovalStatus.IsApproved)
+    {
+      Write-Host "Approved by: API Review Hub"
+      Write-Host "API Review Hub: $($apiReviewHubApprovalStatus.Details)"
+    }
+  }
+  else
+  {
+    Write-Warning "Result: Not approved. Neither APIView nor API Review Hub approved this release gate."
+    Write-Warning "APIView: $apiViewApprovalDetails"
+    Write-Warning "API Review Hub: $($apiReviewHubApprovalStatus.Details)"
+  }
+}
+
+function Check-ApiReviewHubReleaseGate([string]$packageName, [string]$packageVersion, [string]$language, [string]$apiHash, $apiApprovalStatus, $packageNameStatus)
+{
+  try
+  {
+    $requestUrl = New-ApiReviewHubReleaseGateUrl $language $packageName $packageVersion $apiHash
+    Write-Host "Request to API Review Hub: [$requestUrl]"
+    $headers = Get-ApiReviewHubHeaders
+    $response = Invoke-WebRequest $requestUrl -Method 'GET' -Headers $headers
+    Write-Host "API Review Hub response: $($response.StatusCode)"
+    $decision = $response.Content | ConvertFrom-Json
+
+    if ($decision.allowed)
+    {
+      $apiApprovalStatus.IsApproved = $true
+      $apiApprovalStatus.Details = "API Review Hub release gate is approved for package $packageName with API hash $apiHash."
+      $packageNameStatus.IsApproved = $true
+      $packageNameStatus.Details = "Package name approval satisfied by API Review Hub release gate for package $packageName."
+      Write-Host "API Review Hub approval: Approved"
+      Write-Host "API Review Hub details: $($apiApprovalStatus.Details)"
+      return [PSCustomObject]@{
+        IsApproved = $true
+        Details = $apiApprovalStatus.Details
+      }
+    }
+
+    $apiReviewHubDetails = "API Review Hub release gate is not approved for package $packageName. Reason: $($decision.reason)."
+    Write-Host "API Review Hub approval: Not approved"
+    Write-Host "API Review Hub details: $apiReviewHubDetails"
+    return [PSCustomObject]@{
+      IsApproved = $false
+      Details = $apiReviewHubDetails
+    }
+  }
+  catch
+  {
+    $apiReviewHubDetails = "Failed to check API Review Hub release gate for package $packageName. Error: $_"
+    Write-Warning $apiReviewHubDetails
+    return [PSCustomObject]@{
+      IsApproved = $false
+      Details = $apiReviewHubDetails
+    }
+  }
+}
+
+function New-ApiReviewHubReleaseGateUrl([string]$language, [string]$packageName, [string]$packageVersion, [string]$apiHash)
+{
+  $baseUrl = $ApiReviewHubEndpoint.TrimEnd('/')
+  if (!$baseUrl.EndsWith('/api/releases/check-gate'))
+  {
+    $baseUrl = "$baseUrl/api/releases/check-gate"
+  }
+
+  $query = @(
+    "language=$([System.Net.WebUtility]::UrlEncode($language))",
+    "packageName=$([System.Net.WebUtility]::UrlEncode($packageName))",
+    "version=$([System.Net.WebUtility]::UrlEncode($packageVersion))",
+    "apiHash=$([System.Net.WebUtility]::UrlEncode($apiHash))"
+  ) -join '&'
+  return "$baseUrl`?$query"
+}
+
+function Get-ApiReviewHubHeaders()
+{
+  $token = az account get-access-token --resource $ApiReviewHubResource --query accessToken --output tsv 2>$null
+  if ($LASTEXITCODE -ne 0 -or !$token)
+  {
+    throw "Failed to acquire API Review Hub access token for resource $ApiReviewHubResource."
+  }
+
+  return @{ "Authorization" = "Bearer $token" }
 }
 
 function Process-ReviewStatusCode($statusCode, $packageName, $apiApprovalStatus, $packageNameStatus)

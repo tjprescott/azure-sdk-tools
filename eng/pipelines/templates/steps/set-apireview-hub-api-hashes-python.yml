@@ -1,0 +1,34 @@
+# Stamps PackageInfo files with API Review Hub hashes for Python release validation.
+# This template expects Python package build artifacts to contain the generated
+# api.md file produced from the build artifact, not source-controlled metadata.
+parameters:
+  - name: ArtifactPath
+    type: string
+    default: $(Build.ArtifactStagingDirectory)
+  - name: Artifacts
+    type: object
+    default: []
+  - name: ConfigFileDir
+    type: string
+    default: $(Build.ArtifactStagingDirectory)/PackageInfo
+  - name: PackageInfoFiles
+    type: object
+    default: []
+  - name: SourceRootPath
+    type: string
+    default: $(Build.SourcesDirectory)
+
+steps:
+  - task: PowerShell@2
+    inputs:
+      filePath: ${{ parameters.SourceRootPath }}/eng/common/scripts/Set-PythonApiReviewHashes.ps1
+      # PackageInfoFiles example: @('a/file1.json','a/file2.json')
+      arguments: >
+        -ArtifactList ('${{ convertToJson(parameters.Artifacts) }}' | ConvertFrom-Json | Select-Object Name)
+        -ArtifactPath '${{ parameters.ArtifactPath }}'
+        -ConfigFileDir '${{ parameters.ConfigFileDir }}'
+        -PackageInfoFiles @('${{ join(''',''', parameters.PackageInfoFiles) }}')
+      pwsh: true
+      workingDirectory: $(Pipeline.Workspace)
+    displayName: Set Python API Review Hub API hashes
+    condition: succeededOrFailed()

@@ -13,6 +13,7 @@
     "check": "tsc -p tsconfig.json --noEmit",
     "deploy": "tsx scripts/deploy-app.ts",
     "check-release": "tsx scripts/check-release.ts",
+    "check-release-gate": "pwsh -File scripts/check-release-gate.ps1",
     "create-review-pr": "tsx scripts/create-review-pr.ts",
     "callback-operation": "tsx scripts/callback-operation.ts",
     "request-review-pr": "tsx scripts/request-review-pr.ts",

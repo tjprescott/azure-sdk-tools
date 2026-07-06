@@ -59,7 +59,16 @@ function ValidateChangeLog($changeLogPath, $versionString, $validationStatus)
 }
 
 # Function to verify API review status
-function VerifyAPIReview($packageName, $packageVersion, $language)
+function GetOptionalPackageInfoProperty($packageInfo, [string]$propertyName)
+{
+    if ($packageInfo.PSObject.Properties.Name -contains $propertyName) {
+        return $packageInfo.$propertyName
+    }
+    return $null
+}
+
+# Function to verify API review status
+function VerifyAPIReview($packageName, $packageVersion, $language, $apiHash = $null)
 {
     $APIReviewValidation = [PSCustomObject]@{
         Name = "API Review Approval"
@@ -83,7 +92,7 @@ function VerifyAPIReview($packageName, $packageVersion, $language)
             Details = ""
         }
         Write-Host "Checking API review status for package $packageName with version $packageVersion. language [$language]."
-        Check-ApiReviewStatus $packageName $packageVersion $language $APIViewUri $APIKey $apiStatus $packageNameStatus
+        Check-ApiReviewStatus $packageName $packageVersion $language $APIViewUri $APIKey $apiStatus $packageNameStatus $apiHash
 
         Write-Host "API review approval details: $($apiStatus.Details)"
         Write-Host "Package name approval details: $($packageNameStatus.Details)"
@@ -201,7 +210,8 @@ function ProcessPackage($packageInfo)
     # however it will need to migrate the existing data and Java parser also needs the change.
     $fullPackageName = Get-FullPackageName -PackageInfo $packageInfo -UseColonSeparator
     Write-Host "Checking API review status for package $fullPackageName"
-    $apireviewDetails = VerifyAPIReview $fullPackageName $packageInfo.Version $Language
+    $apiHash = GetOptionalPackageInfoProperty $packageInfo "ApiHash"
+    $apireviewDetails = VerifyAPIReview $fullPackageName $packageInfo.Version $Language $apiHash
 
     # The following object will be used to update package work item, the name should be package name only without groupId
     $pkgValidationDetails= [PSCustomObject]@{

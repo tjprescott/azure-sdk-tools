@@ -53,7 +53,8 @@ param(
   [string]$ServiceDirectory,
   [string]$ReleaseDate, # Pass Date in the form MM/dd/yyyy"
   [switch]$ReleaseTrackingOnly = $false,
-  [string]$GroupId
+  [string]$GroupId,
+  [string]$ApiHash
 )
 Set-StrictMode -Version 3
 
@@ -184,7 +185,7 @@ try
   $url = az keyvault secret show --name "APIURL" --vault-name "AzureSDKPrepRelease-KV" --query "value" --output "tsv"
   $apiKey = az keyvault secret show --name "APIKEY" --vault-name "AzureSDKPrepRelease-KV" --query "value" --output "tsv"
   $fullPackageNameInApiView = Get-FullPackageName -PackageInfo $packageProperties -UseColonSeparator
-  Check-ApiReviewStatus -PackageName $fullPackageNameInApiView -packageVersion $newVersion -Language $LanguageDisplayName -url $url -apiKey $apiKey
+  Check-ApiReviewStatus -PackageName $fullPackageNameInApiView -packageVersion $newVersion -Language $LanguageDisplayName -url $url -apiKey $apiKey -apiHash $ApiHash
 }
 catch
 {

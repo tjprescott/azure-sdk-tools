@@ -71,7 +71,16 @@ function ValidateChangeLog($changeLogPath, $versionString, $validationStatus)
 }
 
 # Function to verify API review status
-function VerifyAPIReview($packageName, $packageVersion, $language)
+function GetOptionalPackageInfoProperty($packageInfo, [string]$propertyName)
+{
+    if ($packageInfo.PSObject.Properties.Name -contains $propertyName) {
+        return $packageInfo.$propertyName
+    }
+    return $null
+}
+
+# Function to verify API review status
+function VerifyAPIReview($packageName, $packageVersion, $language, $apiHash = $null)
 {
     $APIReviewValidation = [PSCustomObject]@{
         Name = "API Review Approval"
@@ -95,7 +104,7 @@ function VerifyAPIReview($packageName, $packageVersion, $language)
             Details = ""
         }
         Write-Host "Checking API review status for package $packageName with version $packageVersion. language [$language]."
-        Check-ApiReviewStatus $packageName $packageVersion $language $APIViewUri $APIKey $apiStatus $packageNameStatus
+        Check-ApiReviewStatus $packageName $packageVersion $language $APIViewUri $APIKey $apiStatus $packageNameStatus $apiHash
 
         Write-Host "API review approval details: $($apiStatus.Details)"
         Write-Host "Package name approval details: $($packageNameStatus.Details)"
@@ -213,7 +222,8 @@ if ($groupId){
     $fulPackageName = "${groupId}:${pkgName}"
 }
 Write-Host "Checking API review status for package $fulPackageName"
-$apireviewDetails = VerifyAPIReview $fulPackageName $pkgInfo.Version $Language
+$apiHash = GetOptionalPackageInfoProperty $pkgInfo "ApiHash"
+$apireviewDetails = VerifyAPIReview $fulPackageName $pkgInfo.Version $Language $apiHash
 
 $pkgValidationDetails= [PSCustomObject]@{
     Name = $pkgName
