@@ -31,13 +31,23 @@ export interface ReviewPullRequestRecord {
     readonly workingBranch: string;
     readonly operationId: string;
     readonly buildId: string;
-    readonly approvalStatus: ReviewPullRequestApprovalStatus;
+    readonly approval: ApprovalRecord;
     readonly createdOn: string;
     readonly lastUpdatedOn: string;
 }
 
 export type ReviewPullRequestStatus = "draft" | "open" | "closed" | "merged";
-export type ReviewPullRequestApprovalStatus = "approved" | "rejected" | "revoked" | "pending";
+export type ApprovalStatus = "approved" | "rejected" | "revoked" | "pending";
+
+export interface ApprovalRecord {
+    readonly packageName: string;
+    readonly version: string;
+    readonly apiHash: string;
+    readonly commitSha?: string;
+    readonly status: ApprovalStatus;
+    readonly lastUpdatedBy: string;
+    readonly lastUpdatedOn: string;
+}
 
 export interface SaveReviewPullRequestRecordRequest {
     readonly packageVersionId: string;
@@ -50,6 +60,7 @@ export interface SaveReviewPullRequestRecordRequest {
     readonly targetVersion: string;
     readonly baseRef: string;
     readonly targetRef: string;
+    readonly apiHash: string;
     readonly workingBranch: string;
     readonly reviewPullRequest: PublishedApiReviewPullRequest;
 }
@@ -81,7 +92,7 @@ export async function saveReviewPullRequestRecord(request: SaveReviewPullRequest
         workingBranch: request.workingBranch,
         operationId: request.operationId,
         buildId: request.buildId,
-        approvalStatus: existingRecord?.approvalStatus ?? "pending",
+        approval: existingRecord?.approval ?? createApprovalRecord(request.packageName, request.targetVersion, request.apiHash, "pending", "api-review-hub", now),
         createdOn: existingRecord?.createdOn ?? now,
         lastUpdatedOn: now,
     };
@@ -163,7 +174,10 @@ export async function updateReviewPullRequestStatus(
 export async function updateReviewPullRequestApprovalStatus(
     githubRepositoryId: number,
     pullRequestNumber: number,
-    approvalStatus: ReviewPullRequestApprovalStatus,
+    approvalStatus: ApprovalStatus,
+    lastUpdatedBy: string,
+    apiHash: string,
+    commitSha: string,
 ): Promise<ReviewPullRequestRecord | undefined> {
     const container = await getReviewPullRequestsContainer();
     const pullRequestNo = String(pullRequestNumber);
@@ -173,25 +187,89 @@ export async function updateReviewPullRequestApprovalStatus(
         return undefined;
     }
 
-    if (existingRecord.approvalStatus === approvalStatus) {
+    const previousApproval = existingRecord.approval;
+    if (previousApproval?.status === approvalStatus
+        && previousApproval.lastUpdatedBy === lastUpdatedBy
+        && previousApproval.apiHash === apiHash
+        && previousApproval.commitSha === commitSha) {
         return existingRecord;
     }
 
+    const now = new Date().toISOString();
+    const approval = createApprovalRecord(
+        existingRecord.packageName,
+        existingRecord.targetVersion,
+        apiHash,
+        approvalStatus,
+        lastUpdatedBy,
+        now,
+        commitSha,
+    );
+
     const updatedRecord: ReviewPullRequestRecord = {
         ...existingRecord,
-        approvalStatus,
-        lastUpdatedOn: new Date().toISOString(),
+        approval,
+        lastUpdatedOn: now,
     };
     await container.items.upsert(updatedRecord);
     console.log(JSON.stringify({
         event: "reviewPullRequestApprovalStatusUpdated",
         pullRequestNo,
         githubRepositoryId,
-        previousApprovalStatus: existingRecord.approvalStatus,
-        approvalStatus: updatedRecord.approvalStatus,
+        previousApprovalStatus: previousApproval?.status,
+        approvalStatus: updatedRecord.approval.status,
+        apiHash: updatedRecord.approval.apiHash,
+        commitSha: updatedRecord.approval.commitSha,
+        lastUpdatedBy: updatedRecord.approval.lastUpdatedBy,
     }));
 
     return updatedRecord;
+}
+
+export async function findLatestApprovalRecord(
+    language: string,
+    packageName: string,
+    version: string,
+): Promise<ApprovalRecord | undefined> {
+    const container = await getReviewPullRequestsContainer();
+    const response = await container.items.query<ReviewPullRequestRecord>({
+        query: `
+            SELECT * FROM reviewPullRequests pr
+            WHERE pr.language = @language
+                AND pr.packageName = @packageName
+                AND pr.targetVersion = @version
+        `,
+        parameters: [
+            { name: "@language", value: language },
+            { name: "@packageName", value: packageName },
+            { name: "@version", value: version },
+        ],
+    }).fetchAll();
+
+    return response.resources
+        .map((record) => record.approval)
+        .filter((approval): approval is ApprovalRecord => approval !== undefined)
+        .sort((left, right) => right.lastUpdatedOn.localeCompare(left.lastUpdatedOn))[0];
+}
+
+function createApprovalRecord(
+    packageName: string,
+    version: string,
+    apiHash: string,
+    status: ApprovalStatus,
+    lastUpdatedBy: string,
+    lastUpdatedOn: string,
+    commitSha?: string,
+): ApprovalRecord {
+    return {
+        packageName,
+        version,
+        apiHash,
+        ...(commitSha ? { commitSha } : {}),
+        status,
+        lastUpdatedBy,
+        lastUpdatedOn,
+    };
 }
 
 async function readReviewPullRequestRecord(container: Container, pullRequestNo: string, githubRepositoryId: number): Promise<ReviewPullRequestRecord | undefined> {

@@ -6,14 +6,14 @@ import { DefaultAzureCredential } from "@azure/identity";
 import { SecretClient, type KeyVaultSecret } from "@azure/keyvault-secrets";
 
 import { getRequiredSetting } from "../config/settings.js";
-import { isArchitectReviewerForPackage } from "../github/repository-actions.js";
+import { getApiHashForPackageAtCommit, isArchitectReviewerForPackage } from "../github/repository-actions.js";
 import type { RepositoryRegistration } from "../models/models.js";
 import {
     findOpenReviewPullRequestsByWorkingBranch,
     getReviewPullRequestRecord,
     updateReviewPullRequestApprovalStatus,
     updateReviewPullRequestStatus,
-    type ReviewPullRequestApprovalStatus,
+    type ApprovalStatus,
     type ReviewPullRequestStatus,
 } from "../services/review-pr-store.js";
 import { getRequiredHeader, logRequest, readRequestBody, sendEmpty, sendError } from "./http.js";
@@ -39,6 +39,7 @@ interface GitHubWebhookPayload {
     readonly review?: {
         readonly id?: number;
         readonly state?: string;
+        readonly commit_id?: string;
         readonly user?: {
             readonly login?: string;
         };
@@ -268,7 +269,8 @@ async function handlePushWebhookEvent(deliveryId: string, githubRepositoryId: nu
 async function handlePullRequestReviewWebhookEvent(deliveryId: string, githubRepositoryId: number, payload: GitHubWebhookPayload): Promise<void> {
     const pullRequestNumber = payload.pull_request?.number;
     const reviewer = payload.review?.user?.login;
-    if (!payload.action || !pullRequestNumber || !reviewer) {
+    const reviewCommitSha = payload.review?.commit_id;
+    if (!payload.action || !pullRequestNumber || !reviewer || !reviewCommitSha) {
         logRequest("POST /api/github/webhook-events ignored", {
             reason: "invalidPullRequestReviewPayload",
             eventType: "pull_request_review",
@@ -278,6 +280,7 @@ async function handlePullRequestReviewWebhookEvent(deliveryId: string, githubRep
             pullRequestNumber,
             reviewId: payload.review?.id,
             reviewState: payload.review?.state,
+            reviewCommitSha,
             reviewer,
         });
         return;
@@ -294,6 +297,7 @@ async function handlePullRequestReviewWebhookEvent(deliveryId: string, githubRep
             pullRequestNumber,
             reviewId: payload.review?.id,
             reviewState: payload.review?.state,
+            reviewCommitSha,
             reviewer,
         });
         return;
@@ -309,6 +313,7 @@ async function handlePullRequestReviewWebhookEvent(deliveryId: string, githubRep
             pullRequestNumber,
             reviewId: payload.review?.id,
             reviewState: payload.review?.state,
+            reviewCommitSha,
             reviewer,
         }));
         return;
@@ -323,6 +328,7 @@ async function handlePullRequestReviewWebhookEvent(deliveryId: string, githubRep
             repositoryFullName: reviewPullRequest.repositoryFullName,
             pullRequestNumber,
             reviewId: payload.review?.id,
+            reviewCommitSha,
             reviewer,
         }));
         return;
@@ -343,13 +349,20 @@ async function handlePullRequestReviewWebhookEvent(deliveryId: string, githubRep
             pullRequestNumber,
             reviewId: payload.review?.id,
             reviewState: payload.review?.state,
+            reviewCommitSha,
             reviewer,
             packageRelativePath: reviewPullRequest.packageRelativePath,
         }));
         return;
     }
 
-    const updatedRecord = await updateReviewPullRequestApprovalStatus(githubRepositoryId, pullRequestNumber, approvalStatus);
+    const apiHash = await getApiHashForPackageAtCommit({
+        owner: repository.owner,
+        repo: repository.repo,
+        packageRelativePath: reviewPullRequest.packageRelativePath,
+        commitSha: reviewCommitSha,
+    });
+    const updatedRecord = await updateReviewPullRequestApprovalStatus(githubRepositoryId, pullRequestNumber, approvalStatus, reviewer, apiHash, reviewCommitSha);
     console.log(JSON.stringify({
         event: updatedRecord ? "reviewPullRequestApprovalWebhookApplied" : "pullRequestReviewWebhookIgnoredForMissingReviewPullRequest",
         deliveryId,
@@ -358,8 +371,10 @@ async function handlePullRequestReviewWebhookEvent(deliveryId: string, githubRep
         pullRequestNumber,
         reviewId: payload.review?.id,
         reviewState: payload.review?.state,
+        reviewCommitSha,
         reviewer,
         approvalStatus,
+        apiHash,
     }));
 }
 
@@ -428,7 +443,7 @@ function getPullRequestStatusFromWebhookPayload(
     return undefined;
 }
 
-function getPullRequestReviewApprovalStatus(action: string, reviewState: string | undefined): ReviewPullRequestApprovalStatus | undefined {
+function getPullRequestReviewApprovalStatus(action: string, reviewState: string | undefined): ApprovalStatus | undefined {
     const normalizedState = reviewState?.toLowerCase();
 
     if (action === "dismissed" || normalizedState === "dismissed" || normalizedState === "stale") {

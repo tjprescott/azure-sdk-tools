@@ -91,6 +91,9 @@ namespace ApiReviewHub {
       /** The API hash that was approved. */
       apiHash: string;
 
+      /** Git commit SHA on the review branch that this approval decision applies to. */
+      commitSha?: string;
+
       /** Approval outcome. */
       status: ApprovalStatus;
 

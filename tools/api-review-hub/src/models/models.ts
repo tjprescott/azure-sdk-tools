@@ -58,7 +58,19 @@ export interface OperationUpdate {
 export interface ReleaseGateDecision {
     readonly allowed: boolean;
     readonly reason: "approved" | "missingApproval" | "rejected" | "unknownPackage" | "staleArtifact";
-    readonly approval?: unknown;
+    readonly approval: ApprovalRecord;
+}
+
+export type ApprovalStatus = "approved" | "rejected" | "revoked" | "pending";
+
+export interface ApprovalRecord {
+    readonly packageName: string;
+    readonly version: string;
+    readonly apiHash: string;
+    readonly commitSha?: string;
+    readonly status: ApprovalStatus;
+    readonly lastUpdatedBy: string;
+    readonly lastUpdatedOn?: string;
 }
 
 export interface MarkPackageVersionReleasedRequest {

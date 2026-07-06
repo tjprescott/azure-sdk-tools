@@ -1,3 +1,5 @@
+import { load } from "js-yaml";
+
 import { getRepositoryInstallationToken, gitHubFetch, gitHubRequest } from "./github-app.js";
 
 const architectsFilePath = ".github/ARCHITECTS";
@@ -47,6 +49,13 @@ export interface IsArchitectReviewerForPackageOptions {
     readonly repo: string;
     readonly packageRelativePath: string;
     readonly reviewer: string;
+}
+
+export interface GetApiHashForPackageAtCommitOptions {
+    readonly owner: string;
+    readonly repo: string;
+    readonly packageRelativePath: string;
+    readonly commitSha: string;
 }
 
 interface GitHubRefResponse {
@@ -208,6 +217,23 @@ export async function isArchitectReviewerForPackage(options: IsArchitectReviewer
     }
 
     return false;
+}
+
+export async function getApiHashForPackageAtCommit(options: GetApiHashForPackageAtCommitOptions): Promise<string> {
+    const token = await getRepositoryInstallationToken(options.owner, options.repo);
+    const repositoryUrl = `https://api.github.com/repos/${options.owner}/${options.repo}`;
+    const packageRelativePath = normalizePackageRelativePath(options.packageRelativePath);
+    const apiMetadataYaml = await readRepositoryFile(repositoryUrl, token, `${packageRelativePath}/api.metadata.yml`, options.commitSha);
+    if (!apiMetadataYaml) {
+        throw new Error(`API metadata file was not found for '${packageRelativePath}' at commit '${options.commitSha}'.`);
+    }
+
+    const apiHash = getApiHashFromMetadata(load(apiMetadataYaml));
+    if (!apiHash) {
+        throw new Error(`API metadata file for '${packageRelativePath}' at commit '${options.commitSha}' did not include apiHash.`);
+    }
+
+    return apiHash;
 }
 
 async function isRepositoryOwnerTeamMember(owner: string, team: string, user: string, token: string): Promise<boolean> {
@@ -421,8 +447,13 @@ async function resolveArchitectReviewers(
 }
 
 async function readArchitectsFile(repositoryUrl: string, token: string): Promise<string | undefined> {
-    const searchParameters = new URLSearchParams({ ref: architectsFileRef });
-    const response = await gitHubFetch(`${repositoryUrl}/contents/${architectsFilePath}?${searchParameters}`, token, "Bearer");
+    return readRepositoryFile(repositoryUrl, token, architectsFilePath, architectsFileRef);
+}
+
+async function readRepositoryFile(repositoryUrl: string, token: string, path: string, ref: string): Promise<string | undefined> {
+    const searchParameters = new URLSearchParams({ ref });
+    const encodedPath = path.split("/").map(encodeURIComponent).join("/");
+    const response = await gitHubFetch(`${repositoryUrl}/contents/${encodedPath}?${searchParameters}`, token, "Bearer");
     if (response.status === 404) {
         return undefined;
     }
@@ -433,10 +464,20 @@ async function readArchitectsFile(repositoryUrl: string, token: string): Promise
 
     const content = await response.json() as GitHubContentResponse;
     if (content.encoding !== "base64" || !content.content) {
-        throw new Error("GitHub ARCHITECTS file response did not include base64 content.");
+        throw new Error(`GitHub file response for '${path}' did not include base64 content.`);
     }
 
     return Buffer.from(content.content, "base64").toString("utf8");
+}
+
+function getApiHashFromMetadata(metadata: unknown): string | undefined {
+    if (typeof metadata !== "object" || metadata === null) {
+        return undefined;
+    }
+
+    const record = metadata as Record<string, unknown>;
+    const apiMdSha256 = record["apiMdSha256"];
+    return typeof apiMdSha256 === "string" && apiMdSha256.length > 0 ? apiMdSha256 : undefined;
 }
 
 function findMatchingOwners(architects: string, packageRelativePath: string): string[] {

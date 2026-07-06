@@ -6,7 +6,7 @@ This is a new TypeScript web application that coordinates Azure SDK API review w
 
 The service must stay independent from the existing APIView application and the Python `apiview-copilot` package. Do not reuse APIView or APIView Copilot runtime code, data stores, deployment infrastructure, or service-specific assumptions. Existing systems may call this service through explicit APIs.
 
-Use [./proposal-api-review-hub-webapp.md](./proposal-api-review-hub-webapp.md) as the source of truth for product and architecture intent, and [./main.tsp](./main.tsp) as the source of truth for the proposed API contract until this folder has more complete implementation docs.
+Use [./proposal-api-review-hub-webapp.md](./proposal-api-review-hub-webapp.md) as the source of truth for product and architecture intent, and [./main.tsp](./main.tsp) as the source of truth for the API contract until this folder has more complete implementation docs. The implementation must track the TypeSpec contract: routes, request/response models, persistence-facing records, and release-gate behavior should be checked against `main.tsp` before adding or changing code.
 
 ## Tech Stack
 
@@ -56,6 +56,8 @@ All service endpoints must live under `/api`. Keep the GitHub webhook route stab
 ### HTTP APIs
 
 - Keep all API routes under `/api`.
+- Implement endpoints declared in `main.tsp`; do not leave TypeSpec operations as contract-only stubs when the feature is considered implemented.
+- When adding or changing an endpoint, update `main.tsp` first or in the same change, then implement the route, handler, validation, service logic, and persistence mapping to match it.
 - Validate method, path, headers, content type, and request body before mutating state.
 - Return sanitized error responses without stack traces.
 - Use stable response shapes for agent-facing endpoints.
@@ -87,6 +89,10 @@ All service endpoints must live under `/api`. Keep the GitHub webhook route stab
 ### Persistence
 
 - Cosmos DB should store only coordination data needed for workflow state, idempotency, release gates, and diagnostics.
+- Persistence models must align with `main.tsp` resource models unless there is a deliberate internal-only field needed for partitioning, lookup, correlation, or diagnostics.
+- Do not persist alternate shapes for TypeSpec-modeled data. For example, if the TypeSpec model uses an object such as `ApprovalRecord`, store that object rather than a parallel scalar status field.
+- Use GUIDs for TypeSpec `Guid` identifiers. Do not replace them with deterministic natural keys; add explicit lookup fields when natural-key queries are required.
+- Keep calculated TypeSpec properties out of storage unless the contract explicitly says they are persisted. Calculate them in read/query services from the source records.
 - Suggested logical containers: `services`, `packages`, `packageVersions`, `reviewPullRequests`, `webhookEvents`, and `repositoryRegistrations`.
 - Choose partition keys around access patterns: webhook correlation, package lookup by language and name, release-gating lookup by package version and API hash, and inspection by delivery ID.
 - Make state transitions retry-safe and resilient to duplicate or out-of-order GitHub events.

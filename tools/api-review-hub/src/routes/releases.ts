@@ -22,7 +22,7 @@ export async function handleEvaluateReleaseGate(request: IncomingMessage, respon
         }
     }
 
-    sendJson(response, 200, evaluateReleaseGate({ language, packageName, version, apiHash }));
+    sendJson(response, 200, await evaluateReleaseGate({ language, packageName, version, apiHash }));
 }
 
 export async function handleMarkPackageVersionReleased(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -44,7 +44,12 @@ export async function handleMarkPackageVersionReleased(request: IncomingMessage,
         return;
     }
 
-    markPackageVersionReleased(body as MarkPackageVersionReleasedRequest);
+    const updated = await markPackageVersionReleased(body as MarkPackageVersionReleasedRequest);
+    if (!updated) {
+        sendError(response, 404, "packageVersionNotFound", "The package version was not found.");
+        return;
+    }
+
     sendEmpty(response, 204);
 }
 

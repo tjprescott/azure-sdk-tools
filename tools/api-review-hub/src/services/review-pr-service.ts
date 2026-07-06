@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import type {
     OperationArtifactNames,
@@ -167,6 +167,7 @@ export async function processOperationUpdateResults(operationId: string, update:
         const targetRef = getRequiredString(resultSummary.targetRef ?? targetArtifact.metadata.ref, "result-summary.targetRef");
         const baseVersion = getRequiredString(resultSummary.baseVersion ?? baseArtifact.metadata.version, "result-summary.baseVersion");
         const targetVersion = getRequiredString(resultSummary.targetVersion ?? targetArtifact.metadata.version, "result-summary.targetVersion");
+        const apiHash = getApiHash(targetArtifact.apiMd);
         const branchPackageName = sanitizeBranchSegment(packageName);
         const baseBranch = `apireview/base_${branchPackageName}_${sanitizeBranchSegment(baseVersion)}`;
         const reviewBranch = `apireview/review_${branchPackageName}_${sanitizeBranchSegment(targetVersion)}`;
@@ -213,6 +214,7 @@ export async function processOperationUpdateResults(operationId: string, update:
             targetVersion,
             baseRef,
             targetRef,
+            apiHash,
             workingBranch: targetBranch,
             reviewPullRequest,
         });
@@ -306,6 +308,10 @@ function getRequiredArtifactFile(artifact: DownloadedAdoArtifact, fileName: stri
     }
 
     throw new Error(`Artifact '${artifact.name}' did not contain required file '${fileName}'.`);
+}
+
+function getApiHash(apiMd: Buffer): string {
+    return createHash("sha256").update(apiMd).digest("hex");
 }
 
 function verifyResultSummary(operationId: string, update: OperationUpdate, resultSummary: ResultSummary): void {

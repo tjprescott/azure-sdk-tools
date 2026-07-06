@@ -50,6 +50,35 @@ export async function upsertPackageVersion(request: UpsertPackageVersionRequest)
     return { package: packageRecord, packageVersion };
 }
 
+export async function markPackageVersionReleased(language: string, packageName: string, version: string, releasedOn: string): Promise<PackageVersionRecord | undefined> {
+    const packagesContainer = await getPackagesContainer();
+    const packageRecord = await findPackageRecord(packagesContainer, language, packageName);
+    if (!packageRecord) {
+        return undefined;
+    }
+
+    const packageVersionsContainer = await getPackageVersionsContainer();
+    const existingRecord = await findPackageVersionRecord(packageVersionsContainer, packageRecord.id, version);
+    if (!existingRecord) {
+        return undefined;
+    }
+
+    const updatedRecord: PackageVersionRecord = {
+        ...existingRecord,
+        releasedOn,
+        lastUpdatedOn: new Date().toISOString(),
+    };
+    await packageVersionsContainer.items.upsert(updatedRecord);
+    console.log(JSON.stringify({
+        event: "packageVersionMarkedReleased",
+        packageVersionId: updatedRecord.id,
+        packageId: updatedRecord.packageId,
+        version: updatedRecord.version,
+        releasedOn: updatedRecord.releasedOn,
+    }));
+    return updatedRecord;
+}
+
 async function upsertPackage(language: string, packageName: string): Promise<PackageRecord> {
     const now = new Date().toISOString();
     const container = await getPackagesContainer();
