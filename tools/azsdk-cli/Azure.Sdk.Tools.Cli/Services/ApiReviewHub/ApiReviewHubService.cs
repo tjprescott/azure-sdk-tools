@@ -51,13 +51,14 @@ public class ApiReviewHubService(
             return result;
         }
 
+        var startedAt = DateTimeOffset.UtcNow;
+        var loggedPipelineUrl = false;
         while (true)
         {
-            await Task.Delay(pollInterval, ct);
-
             var operation = await GetJsonAsync<OperationStatus>(httpClient, $"{endpoint}/api/operations/{accepted.OperationId}", ct);
             result.Status = operation.Status;
             result.Operation = operation;
+            LogOperationProgress(operation, startedAt, ref loggedPipelineUrl);
 
             if (string.Equals(operation.Status, "succeeded", StringComparison.OrdinalIgnoreCase))
             {
@@ -68,7 +69,31 @@ public class ApiReviewHubService(
             {
                 throw new InvalidOperationException(operation.FailureReason ?? $"API Review Hub operation {operation.OperationId} failed.");
             }
+
+            await Task.Delay(pollInterval, ct);
         }
+    }
+
+    private void LogOperationProgress(OperationStatus operation, DateTimeOffset startedAt, ref bool loggedPipelineUrl)
+    {
+        if (!loggedPipelineUrl && !string.IsNullOrWhiteSpace(operation.PipelineUrl))
+        {
+            logger.LogInformation("API Review Hub build: {pipelineUrl}", operation.PipelineUrl);
+            loggedPipelineUrl = true;
+        }
+
+        logger.LogInformation(
+            "API Review Hub operation {operationId} status: {status} (elapsed {elapsed}).",
+            operation.OperationId,
+            operation.Status,
+            FormatElapsed(DateTimeOffset.UtcNow - startedAt));
+    }
+
+    private static string FormatElapsed(TimeSpan elapsed)
+    {
+        return elapsed.TotalHours >= 1
+            ? elapsed.ToString(@"h\:mm\:ss")
+            : elapsed.ToString(@"m\:ss");
     }
 
     private async Task ConfigureAuthorizationAsync(HttpClient httpClient, string endpoint, CancellationToken ct)

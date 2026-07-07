@@ -64,6 +64,28 @@ export interface ReviewPullRequestLabelOptions {
     readonly pullRequestNumber: number;
 }
 
+export interface ReviewPullRequestOutOfDateOptions extends ReviewPullRequestLabelOptions {
+    readonly operationId: string;
+    readonly pipelineUrl?: string;
+}
+
+export interface ClearReviewPullRequestOutOfDateOptions extends ReviewPullRequestLabelOptions {
+    readonly operationId?: string;
+}
+
+export interface GitBranchDeleteOptions {
+    readonly owner: string;
+    readonly repo: string;
+    readonly branch: string;
+}
+
+export interface GitReferenceExistsOptions {
+    readonly owner: string;
+    readonly repo: string;
+    readonly ref: string;
+    readonly kinds: readonly ("heads" | "tags")[];
+}
+
 export interface PublishUpdatedApiReviewArtifactsRequest {
     readonly owner: string;
     readonly repo: string;
@@ -116,6 +138,11 @@ interface GitHubPullRequestReference {
     readonly htmlUrl: string;
 }
 
+interface GitHubIssueCommentResponse {
+    readonly id: number;
+    readonly body?: string;
+}
+
 interface GitHubContentResponse {
     readonly content?: string;
     readonly encoding?: string;
@@ -125,6 +152,8 @@ interface ArchitectEntry {
     readonly pattern: string;
     readonly owners: string[];
 }
+
+const reviewOutOfDateCommentMarker = "<!-- api-review-hub:review-out-of-date -->";
 
 export async function publishApiReviewPullRequest(request: PublishApiReviewPullRequestRequest): Promise<PublishedApiReviewPullRequest> {
     const token = await getRepositoryInstallationToken(request.owner, request.repo);
@@ -265,16 +294,40 @@ export async function getApiHashForPackageAtCommit(options: GetApiHashForPackage
     return apiHash;
 }
 
-export async function addReviewOutOfDateLabel(options: ReviewPullRequestLabelOptions): Promise<void> {
+export async function markReviewPullRequestOutOfDate(options: ReviewPullRequestOutOfDateOptions): Promise<void> {
     const token = await getRepositoryInstallationToken(options.owner, options.repo);
     const repositoryUrl = `https://api.github.com/repos/${options.owner}/${options.repo}`;
     await addLabel(repositoryUrl, token, options.pullRequestNumber, "review-out-of-date", "b60205", "API review artifacts are being regenerated for newer working branch changes.");
+    await upsertReviewOutOfDateComment(repositoryUrl, token, options.pullRequestNumber, options.operationId, options.pipelineUrl);
 }
 
-export async function removeReviewOutOfDateLabel(options: ReviewPullRequestLabelOptions): Promise<void> {
+export async function clearReviewPullRequestOutOfDate(options: ClearReviewPullRequestOutOfDateOptions): Promise<void> {
     const token = await getRepositoryInstallationToken(options.owner, options.repo);
     const repositoryUrl = `https://api.github.com/repos/${options.owner}/${options.repo}`;
+    if (options.operationId && await hasDifferentReviewOutOfDateOperation(repositoryUrl, token, options.pullRequestNumber, options.operationId)) {
+        return;
+    }
+
     await removeLabel(repositoryUrl, token, options.pullRequestNumber, "review-out-of-date");
+    await deleteReviewOutOfDateCommentsForPullRequest(repositoryUrl, token, options.pullRequestNumber);
+}
+
+export async function deleteGitBranch(options: GitBranchDeleteOptions): Promise<boolean> {
+    const token = await getRepositoryInstallationToken(options.owner, options.repo);
+    const repositoryUrl = `https://api.github.com/repos/${options.owner}/${options.repo}`;
+    return deleteRef(repositoryUrl, token, toHeadsRef(options.branch));
+}
+
+export async function gitReferenceExists(options: GitReferenceExistsOptions): Promise<boolean> {
+    const token = await getRepositoryInstallationToken(options.owner, options.repo);
+    const repositoryUrl = `https://api.github.com/repos/${options.owner}/${options.repo}`;
+    for (const ref of getCandidateRefs(options.ref, options.kinds)) {
+        if (await refExists(repositoryUrl, token, ref)) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 export async function publishUpdatedApiReviewArtifacts(request: PublishUpdatedApiReviewArtifactsRequest): Promise<PublishedUpdatedApiReviewArtifacts> {
@@ -388,6 +441,19 @@ async function getRef(repositoryUrl: string, token: string, ref: string): Promis
     return gitHubRequest<GitHubRefResponse>(`${repositoryUrl}/git/ref/${encodeGitRefPath(ref)}`, token, "Bearer");
 }
 
+async function refExists(repositoryUrl: string, token: string, ref: string): Promise<boolean> {
+    const response = await gitHubFetch(`${repositoryUrl}/git/ref/${encodeGitRefPath(ref)}`, token, "Bearer");
+    if (response.ok) {
+        return true;
+    }
+
+    if (response.status === 404) {
+        return false;
+    }
+
+    throw new Error(`GitHub API request failed with status ${response.status}: ${await response.text()}`);
+}
+
 async function upsertRef(repositoryUrl: string, token: string, branch: string, sha: string): Promise<void> {
     const ref = toHeadsRef(branch);
     const existingRef = await gitHubFetch(`${repositoryUrl}/git/ref/${encodeGitRefPath(ref)}`, token, "Bearer");
@@ -413,6 +479,21 @@ async function upsertRef(repositoryUrl: string, token: string, branch: string, s
             force: true,
         }),
     });
+}
+
+async function deleteRef(repositoryUrl: string, token: string, ref: string): Promise<boolean> {
+    const response = await gitHubFetch(`${repositoryUrl}/git/refs/${encodeGitRefPath(ref)}`, token, "Bearer", {
+        method: "DELETE",
+    });
+    if (response.ok) {
+        return true;
+    }
+
+    if (response.status === 404) {
+        return false;
+    }
+
+    throw new Error(`GitHub API request failed with status ${response.status}: ${await response.text()}`);
 }
 
 async function getOrCreatePullRequest(options: {
@@ -526,6 +607,98 @@ async function removeLabel(repositoryUrl: string, token: string, pullRequestNumb
     }
 
     throw new Error(`GitHub API request failed with status ${response.status}: ${await response.text()}`);
+}
+
+async function upsertReviewOutOfDateComment(
+    repositoryUrl: string,
+    token: string,
+    pullRequestNumber: number,
+    operationId: string,
+    pipelineUrl: string | undefined,
+): Promise<void> {
+    const body = createReviewOutOfDateCommentBody(operationId, pipelineUrl);
+    const existingComments = await findReviewOutOfDateComments(repositoryUrl, token, pullRequestNumber);
+    const existingComment = existingComments.at(-1);
+    if (existingComment) {
+        await gitHubRequest<unknown>(`${repositoryUrl}/issues/comments/${existingComment.id}`, token, "Bearer", {
+            method: "PATCH",
+            body: JSON.stringify({ body }),
+        });
+        await deleteReviewOutOfDateComments(repositoryUrl, token, existingComments.filter((comment) => comment.id !== existingComment.id));
+        return;
+    }
+
+    await gitHubRequest<unknown>(`${repositoryUrl}/issues/${pullRequestNumber}/comments`, token, "Bearer", {
+        method: "POST",
+        body: JSON.stringify({ body }),
+    });
+}
+
+async function deleteReviewOutOfDateCommentsForPullRequest(repositoryUrl: string, token: string, pullRequestNumber: number): Promise<void> {
+    const existingComments = await findReviewOutOfDateComments(repositoryUrl, token, pullRequestNumber);
+    if (existingComments.length === 0) {
+        return;
+    }
+
+    await deleteReviewOutOfDateComments(repositoryUrl, token, existingComments);
+}
+
+async function hasDifferentReviewOutOfDateOperation(
+    repositoryUrl: string,
+    token: string,
+    pullRequestNumber: number,
+    operationId: string,
+): Promise<boolean> {
+    const existingComment = await findLatestReviewOutOfDateComment(repositoryUrl, token, pullRequestNumber);
+    return existingComment !== undefined && !existingComment.body?.includes(createReviewOutOfDateOperationMarker(operationId));
+}
+
+async function findLatestReviewOutOfDateComment(
+    repositoryUrl: string,
+    token: string,
+    pullRequestNumber: number,
+): Promise<GitHubIssueCommentResponse | undefined> {
+    return (await findReviewOutOfDateComments(repositoryUrl, token, pullRequestNumber)).at(-1);
+}
+
+async function findReviewOutOfDateComments(
+    repositoryUrl: string,
+    token: string,
+    pullRequestNumber: number,
+): Promise<GitHubIssueCommentResponse[]> {
+    const comments = await gitHubRequest<GitHubIssueCommentResponse[]>(`${repositoryUrl}/issues/${pullRequestNumber}/comments?per_page=100`, token, "Bearer");
+    return comments.filter((comment) => comment.body?.includes(reviewOutOfDateCommentMarker));
+}
+
+async function deleteReviewOutOfDateComments(
+    repositoryUrl: string,
+    token: string,
+    comments: GitHubIssueCommentResponse[],
+): Promise<void> {
+    for (const comment of comments) {
+        const response = await gitHubFetch(`${repositoryUrl}/issues/comments/${comment.id}`, token, "Bearer", {
+            method: "DELETE",
+        });
+        if (response.ok || response.status === 404) {
+            continue;
+        }
+
+        throw new Error(`GitHub API request failed with status ${response.status}: ${await response.text()}`);
+    }
+}
+
+function createReviewOutOfDateCommentBody(operationId: string, pipelineUrl: string | undefined): string {
+    return [
+        reviewOutOfDateCommentMarker,
+        createReviewOutOfDateOperationMarker(operationId),
+        pipelineUrl
+            ? `A change has been pushed to the working branch and is being processed. Monitor the progress here: ${pipelineUrl}`
+            : "A change has been pushed to the working branch and is being processed.",
+    ].join("\n");
+}
+
+function createReviewOutOfDateOperationMarker(operationId: string): string {
+    return `<!-- api-review-hub:operation:${operationId} -->`;
 }
 
 async function resolveArchitectReviewers(
@@ -760,6 +933,15 @@ function getRefDisplayName(ref: string, refKind: "heads" | "tags"): string {
 function toHeadsRef(branchOrRef: string): string {
     const normalizedRef = branchOrRef.replace(/^refs\//, "");
     return normalizedRef.startsWith("heads/") ? normalizedRef : `heads/${normalizedRef}`;
+}
+
+function getCandidateRefs(ref: string, kinds: readonly ("heads" | "tags")[]): string[] {
+    const normalizedRef = ref.replace(/^refs\//, "");
+    if (normalizedRef.startsWith("heads/") || normalizedRef.startsWith("tags/")) {
+        return [normalizedRef];
+    }
+
+    return kinds.map((kind) => `${kind}/${normalizedRef}`);
 }
 
 function encodeGitRefPath(ref: string): string {

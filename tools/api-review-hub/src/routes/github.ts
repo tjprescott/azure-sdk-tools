@@ -6,13 +6,15 @@ import { DefaultAzureCredential } from "@azure/identity";
 import { SecretClient, type KeyVaultSecret } from "@azure/keyvault-secrets";
 
 import { getRequiredSetting } from "../config/settings.js";
-import { addReviewOutOfDateLabel, getApiHashForPackageAtCommit, isArchitectReviewerForPackage } from "../github/repository-actions.js";
+import { deleteGitBranch, getApiHashForPackageAtCommit, isArchitectReviewerForPackage, markReviewPullRequestOutOfDate } from "../github/repository-actions.js";
 import type { RepositoryRegistration } from "../models/models.js";
 import {
+    findOpenReviewPullRequestsByBaseBranch,
     findOpenReviewPullRequestsByWorkingBranch,
     getReviewPullRequestRecord,
     updateReviewPullRequestApprovalStatus,
     updateReviewPullRequestStatus,
+    type ReviewPullRequestRecord,
     type ApprovalStatus,
     type ReviewPullRequestStatus,
 } from "../services/review-pr-store.js";
@@ -312,12 +314,14 @@ async function handlePushWebhookEvent(deliveryId: string, githubRepositoryId: nu
             continue;
         }
 
-        await addReviewOutOfDateLabel({
+        const acceptedUpdate = await acceptReviewPullRequestUpdate(reviewPullRequest, targetRef);
+        await markReviewPullRequestOutOfDate({
             owner: repository.owner,
             repo: repository.repo,
             pullRequestNumber: reviewPullRequest.pullRequestNumber,
+            operationId: acceptedUpdate.operationId,
+            pipelineUrl: acceptedUpdate.pipelineUrl,
         });
-        const acceptedUpdate = await acceptReviewPullRequestUpdate(reviewPullRequest, targetRef);
         console.log(JSON.stringify({
             event: "reviewPullRequestUpdateQueuedForPush",
             deliveryId,
@@ -327,6 +331,7 @@ async function handlePushWebhookEvent(deliveryId: string, githubRepositoryId: nu
             packageName: reviewPullRequest.packageName,
             pullRequestNumber: reviewPullRequest.pullRequestNumber,
             operationId: acceptedUpdate.operationId,
+            pipelineUrl: acceptedUpdate.pipelineUrl,
         }));
     }
 }
@@ -470,6 +475,10 @@ async function handlePullRequestWebhookEvent(deliveryId: string, githubRepositor
     }
 
     const updatedRecord = await updateReviewPullRequestStatus(githubRepositoryId, payload.pull_request.number, pullRequestStatus);
+    if (updatedRecord && isTerminalPullRequestStatus(pullRequestStatus)) {
+        await cleanupReviewPullRequestBranches(deliveryId, githubRepositoryId, updatedRecord);
+    }
+
     console.log(JSON.stringify({
         event: updatedRecord ? "reviewPullRequestWebhookApplied" : "pullRequestWebhookIgnoredForNonReviewPullRequest",
         deliveryId,
@@ -477,6 +486,63 @@ async function handlePullRequestWebhookEvent(deliveryId: string, githubRepositor
         action: payload.action,
         pullRequestNumber: payload.pull_request.number,
         pullRequestStatus,
+    }));
+}
+
+async function cleanupReviewPullRequestBranches(
+    deliveryId: string,
+    githubRepositoryId: number,
+    reviewPullRequest: ReviewPullRequestRecord,
+): Promise<void> {
+    const repository = parseRepositoryFullName(reviewPullRequest.repositoryFullName);
+    if (!repository) {
+        console.warn(JSON.stringify({
+            event: "reviewPullRequestBranchCleanupSkippedForInvalidRepositoryFullName",
+            deliveryId,
+            githubRepositoryId,
+            repositoryFullName: reviewPullRequest.repositoryFullName,
+            pullRequestNumber: reviewPullRequest.pullRequestNumber,
+        }));
+        return;
+    }
+
+    if (!isApiReviewBranch(reviewPullRequest.reviewBranch, "review") || !isApiReviewBranch(reviewPullRequest.baseBranch, "base")) {
+        console.warn(JSON.stringify({
+            event: "reviewPullRequestBranchCleanupSkippedForUnexpectedBranchName",
+            deliveryId,
+            githubRepositoryId,
+            pullRequestNumber: reviewPullRequest.pullRequestNumber,
+            reviewBranch: reviewPullRequest.reviewBranch,
+            baseBranch: reviewPullRequest.baseBranch,
+        }));
+        return;
+    }
+
+    const openBaseBranchReviewPullRequests = await findOpenReviewPullRequestsByBaseBranch(githubRepositoryId, reviewPullRequest.baseBranch);
+    const reviewBranchDeleted = await deleteGitBranch({
+        owner: repository.owner,
+        repo: repository.repo,
+        branch: reviewPullRequest.reviewBranch,
+    });
+    const baseBranchDeleted = openBaseBranchReviewPullRequests.length === 0
+        ? await deleteGitBranch({
+            owner: repository.owner,
+            repo: repository.repo,
+            branch: reviewPullRequest.baseBranch,
+        })
+        : false;
+
+    console.log(JSON.stringify({
+        event: "reviewPullRequestBranchesCleanedUp",
+        deliveryId,
+        githubRepositoryId,
+        pullRequestNumber: reviewPullRequest.pullRequestNumber,
+        reviewBranch: reviewPullRequest.reviewBranch,
+        reviewBranchDeleted,
+        baseBranch: reviewPullRequest.baseBranch,
+        baseBranchDeleted,
+        openBaseBranchReviewPullRequestCount: openBaseBranchReviewPullRequests.length,
+        openBaseBranchPullRequestNumbers: openBaseBranchReviewPullRequests.map((record) => record.pullRequestNumber),
     }));
 }
 
@@ -532,6 +598,14 @@ function getPullRequestStatusFromWebhookPayload(
     }
 
     return undefined;
+}
+
+function isTerminalPullRequestStatus(status: ReviewPullRequestStatus): boolean {
+    return status === "closed" || status === "merged";
+}
+
+function isApiReviewBranch(branch: string, kind: "base" | "review"): boolean {
+    return branch.startsWith(`apireview/${kind}_`);
 }
 
 function getPullRequestReviewApprovalStatus(action: string, reviewState: string | undefined): ApprovalStatus | undefined {

@@ -8,7 +8,7 @@ import type {
     ReviewPullRequestCreationAcceptedResponse,
     ReviewPullRequestCreationRequest,
 } from "../models/models.js";
-import { publishApiReviewPullRequest, publishUpdatedApiReviewArtifacts, removeReviewOutOfDateLabel } from "../github/repository-actions.js";
+import { clearReviewPullRequestOutOfDate, gitReferenceExists, publishApiReviewPullRequest, publishUpdatedApiReviewArtifacts } from "../github/repository-actions.js";
 import { downloadBuildArtifact, type DownloadedAdoArtifact, queueApiReviewPipeline } from "./ado-pipeline-service.js";
 import { upsertPackageVersion } from "./package-store.js";
 import { saveReviewPullRequestRecord, type ReviewPullRequestRecord } from "./review-pr-store.js";
@@ -26,6 +26,7 @@ export interface ReviewPullRequestCreationOptions {
 export interface ReviewPullRequestUpdateAcceptedResponse {
     readonly operationId: string;
     readonly status: "accepted";
+    readonly pipelineUrl?: string;
 }
 
 interface ReviewPullRequestUpdateRequest {
@@ -44,9 +45,18 @@ export class OperationUpdateConflictError extends Error {
     }
 }
 
+export class ReviewPullRequestCreationValidationError extends Error {
+    public constructor(message: string, public readonly target: string) {
+        super(message);
+        this.name = "ReviewPullRequestCreationValidationError";
+    }
+}
+
 export async function acceptReviewPullRequestCreation(
     request: ReviewPullRequestCreationRequest,
 ): Promise<ReviewPullRequestCreationAcceptedResponse> {
+    await validateReviewPullRequestCreationRefs(request);
+
     const operationId = randomUUID();
     const pipelineProject = "playground";
     const pipelineId = "8259";
@@ -99,6 +109,34 @@ export async function acceptReviewPullRequestCreation(
     operationRequests.set(operationId, request);
 
     return { operationId, status: "accepted" };
+}
+
+async function validateReviewPullRequestCreationRefs(request: ReviewPullRequestCreationRequest): Promise<void> {
+    const baseRefExists = await gitReferenceExists({
+        owner: request.targetBranch.owner,
+        repo: request.targetBranch.repo,
+        ref: request.baseTag,
+        kinds: ["tags", "heads"],
+    });
+    if (!baseRefExists) {
+        throw new ReviewPullRequestCreationValidationError(
+            `The baseTag '${request.baseTag}' was not found as a tag or branch in ${request.targetBranch.owner}/${request.targetBranch.repo}.`,
+            "baseTag",
+        );
+    }
+
+    const targetBranchExists = await gitReferenceExists({
+        owner: request.targetBranch.owner,
+        repo: request.targetBranch.repo,
+        ref: request.targetBranch.name,
+        kinds: ["heads"],
+    });
+    if (!targetBranchExists) {
+        throw new ReviewPullRequestCreationValidationError(
+            `The targetBranch.name '${request.targetBranch.name}' was not found as a branch in ${request.targetBranch.owner}/${request.targetBranch.repo}.`,
+            "targetBranch.name",
+        );
+    }
 }
 
 export async function acceptReviewPullRequestUpdate(
@@ -158,7 +196,7 @@ export async function acceptReviewPullRequestUpdate(
     });
     operationUpdateRequests.set(operationId, { reviewPullRequest, targetRef });
 
-    return { operationId, status: "accepted" };
+    return { operationId, status: "accepted", pipelineUrl: queuedRun.runUrl };
 }
 
 export function getOperation(operationId: string): OperationStatus | undefined {
@@ -216,6 +254,22 @@ export async function processOperationUpdateResults(operationId: string, update:
 
         const resultSummary = await downloadResultSummary(update.project, update.buildId, update.artifacts.result);
         verifyResultSummary(operationId, update, resultSummary);
+
+        if (!isSuccessfulAzureDevOpsResult(update.result)) {
+            const failureReason = getOperationUpdateFailureReason(update, resultSummary);
+            operations.set(operationId, {
+                ...operations.get(operationId),
+                operationId,
+                status: "failed",
+                mode: update.mode,
+                language: update.language,
+                packageName: operations.get(operationId)?.packageName ?? resultSummary.packageName,
+                pipelineProject: update.project,
+                buildId: update.buildId,
+                failureReason,
+            });
+            throw new Error(failureReason);
+        }
 
         if (update.mode === "update") {
             await processReviewPullRequestUpdateResults(operationId, update, resultSummary);
@@ -385,10 +439,11 @@ async function processReviewPullRequestUpdateResults(operationId: string, update
             commitSha: publishedUpdate.commitSha,
         }));
     } finally {
-        await removeReviewOutOfDateLabel({
+        await clearReviewPullRequestOutOfDate({
             owner: repository.owner,
             repo: repository.repo,
             pullRequestNumber: reviewPullRequest.pullRequestNumber,
+            operationId,
         });
         console.log(JSON.stringify({
             event: "reviewPullRequestOutOfDateLabelRemoved",
@@ -411,6 +466,9 @@ interface ResultSummary {
     readonly baseVersion?: string;
     readonly targetVersion?: string;
     readonly packageRelativePath?: string;
+    readonly failureReason?: string;
+    readonly error?: string;
+    readonly message?: string;
 }
 
 interface ArtifactMetadata {
@@ -475,6 +533,17 @@ function verifyResultSummary(operationId: string, update: OperationUpdate, resul
     if (operation?.packageName && resultSummary.packageName && operation.packageName !== resultSummary.packageName) {
         throw new Error(`Result summary packageName '${resultSummary.packageName}' did not match operation packageName '${operation.packageName}'.`);
     }
+}
+
+function isSuccessfulAzureDevOpsResult(result: OperationUpdate["result"]): boolean {
+    return result === "Succeeded" || result === "SucceededWithIssues";
+}
+
+function getOperationUpdateFailureReason(update: OperationUpdate, resultSummary: ResultSummary): string {
+    const details = resultSummary.failureReason ?? resultSummary.error ?? resultSummary.message;
+    return details
+        ? `Artifact generation completed with result ${update.result}: ${details}`
+        : `Artifact generation completed with result ${update.result}.`;
 }
 
 function getRequiredCreateArtifactNames(artifacts: OperationArtifactNames): { base: string; target: string } {

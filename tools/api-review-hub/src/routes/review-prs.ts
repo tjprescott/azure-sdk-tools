@@ -4,6 +4,7 @@ import type { OperationUpdate, ReviewPullRequestCreationRequest } from "../model
 import { AdoPipelineConfigurationError, AdoPipelineQueueError } from "../services/ado-pipeline-service.js";
 import {
     OperationUpdateConflictError,
+    ReviewPullRequestCreationValidationError,
     acceptOperationUpdate,
     acceptReviewPullRequestCreation,
     getOperation,
@@ -34,6 +35,11 @@ export async function handleRequestReviewPullRequestCreation(request: IncomingMe
     try {
         operation = await acceptReviewPullRequestCreation(body as ReviewPullRequestCreationRequest);
     } catch (error) {
+        if (error instanceof ReviewPullRequestCreationValidationError) {
+            sendError(response, 400, "invalidRequest", error.message, error.target);
+            return;
+        }
+
         if (error instanceof AdoPipelineConfigurationError) {
             console.error(JSON.stringify({
                 endpoint: "POST /api/review-prs",

@@ -137,6 +137,27 @@ export async function findOpenReviewPullRequestsByWorkingBranch(
     return response.resources;
 }
 
+export async function findOpenReviewPullRequestsByBaseBranch(
+    githubRepositoryId: number,
+    baseBranch: string,
+): Promise<ReviewPullRequestRecord[]> {
+    const container = await getReviewPullRequestsContainer();
+    const response = await container.items.query<ReviewPullRequestRecord>({
+        query: `
+            SELECT * FROM reviewPullRequests pr
+            WHERE pr.githubRepositoryId = @githubRepositoryId
+                AND pr.baseBranch = @baseBranch
+                AND pr.pullRequestStatus IN ("open", "draft")
+        `,
+        parameters: [
+            { name: "@githubRepositoryId", value: githubRepositoryId },
+            { name: "@baseBranch", value: baseBranch },
+        ],
+    }).fetchAll();
+
+    return response.resources;
+}
+
 export async function updateReviewPullRequestStatus(
     githubRepositoryId: number,
     pullRequestNumber: number,
