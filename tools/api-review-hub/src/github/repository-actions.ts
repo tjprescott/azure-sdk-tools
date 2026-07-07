@@ -141,6 +141,9 @@ interface GitHubPullRequestReference {
 interface GitHubIssueCommentResponse {
     readonly id: number;
     readonly body?: string;
+    readonly user?: {
+        readonly login?: string;
+    };
 }
 
 interface GitHubContentResponse {
@@ -154,6 +157,8 @@ interface ArchitectEntry {
 }
 
 const reviewOutOfDateCommentMarker = "<!-- api-review-hub:review-out-of-date -->";
+const reviewOutOfDateCommentText = "A change has been pushed to the working branch and is being processed.";
+const reviewInSyncCommentText = "The working branch and review PR are currently in sync.";
 
 export async function publishApiReviewPullRequest(request: PublishApiReviewPullRequestRequest): Promise<PublishedApiReviewPullRequest> {
     const token = await getRepositoryInstallationToken(request.owner, request.repo);
@@ -309,7 +314,7 @@ export async function clearReviewPullRequestOutOfDate(options: ClearReviewPullRe
     }
 
     await removeLabel(repositoryUrl, token, options.pullRequestNumber, "review-out-of-date");
-    await deleteReviewOutOfDateCommentsForPullRequest(repositoryUrl, token, options.pullRequestNumber);
+    await updateReviewOutOfDateCommentToInSync(repositoryUrl, token, options.pullRequestNumber, options.operationId);
 }
 
 export async function deleteGitBranch(options: GitBranchDeleteOptions): Promise<boolean> {
@@ -620,10 +625,7 @@ async function upsertReviewOutOfDateComment(
     const existingComments = await findReviewOutOfDateComments(repositoryUrl, token, pullRequestNumber);
     const existingComment = existingComments.at(-1);
     if (existingComment) {
-        await gitHubRequest<unknown>(`${repositoryUrl}/issues/comments/${existingComment.id}`, token, "Bearer", {
-            method: "PATCH",
-            body: JSON.stringify({ body }),
-        });
+        await updateIssueComment(repositoryUrl, token, existingComment.id, body);
         await deleteReviewOutOfDateComments(repositoryUrl, token, existingComments.filter((comment) => comment.id !== existingComment.id));
         return;
     }
@@ -634,13 +636,22 @@ async function upsertReviewOutOfDateComment(
     });
 }
 
-async function deleteReviewOutOfDateCommentsForPullRequest(repositoryUrl: string, token: string, pullRequestNumber: number): Promise<void> {
+async function updateReviewOutOfDateCommentToInSync(repositoryUrl: string, token: string, pullRequestNumber: number, operationId: string | undefined): Promise<void> {
     const existingComments = await findReviewOutOfDateComments(repositoryUrl, token, pullRequestNumber);
-    if (existingComments.length === 0) {
+    const existingComment = existingComments.at(-1);
+    if (!existingComment) {
         return;
     }
 
-    await deleteReviewOutOfDateComments(repositoryUrl, token, existingComments);
+    await updateIssueComment(repositoryUrl, token, existingComment.id, createReviewInSyncCommentBody(operationId));
+    await deleteReviewOutOfDateComments(repositoryUrl, token, existingComments.filter((comment) => comment.id !== existingComment.id));
+}
+
+async function updateIssueComment(repositoryUrl: string, token: string, commentId: number, body: string): Promise<void> {
+    await gitHubRequest<unknown>(`${repositoryUrl}/issues/comments/${commentId}`, token, "Bearer", {
+        method: "PATCH",
+        body: JSON.stringify({ body }),
+    });
 }
 
 async function hasDifferentReviewOutOfDateOperation(
@@ -666,8 +677,16 @@ async function findReviewOutOfDateComments(
     token: string,
     pullRequestNumber: number,
 ): Promise<GitHubIssueCommentResponse[]> {
-    const comments = await gitHubRequest<GitHubIssueCommentResponse[]>(`${repositoryUrl}/issues/${pullRequestNumber}/comments?per_page=100`, token, "Bearer");
-    return comments.filter((comment) => comment.body?.includes(reviewOutOfDateCommentMarker));
+    const matchingComments: GitHubIssueCommentResponse[] = [];
+    const perPage = 100;
+    for (let page = 1; ; page++) {
+        const searchParameters = new URLSearchParams({ per_page: perPage.toString(), page: page.toString() });
+        const comments = await gitHubRequest<GitHubIssueCommentResponse[]>(`${repositoryUrl}/issues/${pullRequestNumber}/comments?${searchParameters}`, token, "Bearer");
+        matchingComments.push(...comments.filter((comment) => comment.body?.includes(reviewOutOfDateCommentMarker)));
+        if (comments.length < perPage) {
+            return matchingComments;
+        }
+    }
 }
 
 async function deleteReviewOutOfDateComments(
@@ -692,9 +711,17 @@ function createReviewOutOfDateCommentBody(operationId: string, pipelineUrl: stri
         reviewOutOfDateCommentMarker,
         createReviewOutOfDateOperationMarker(operationId),
         pipelineUrl
-            ? `A change has been pushed to the working branch and is being processed. Monitor the progress here: ${pipelineUrl}`
-            : "A change has been pushed to the working branch and is being processed.",
+            ? `${reviewOutOfDateCommentText} Monitor the progress here: ${pipelineUrl}`
+            : reviewOutOfDateCommentText,
     ].join("\n");
+}
+
+function createReviewInSyncCommentBody(operationId: string | undefined): string {
+    return [
+        reviewOutOfDateCommentMarker,
+        operationId ? createReviewOutOfDateOperationMarker(operationId) : undefined,
+        reviewInSyncCommentText,
+    ].filter((line) => line !== undefined).join("\n");
 }
 
 function createReviewOutOfDateOperationMarker(operationId: string): string {
