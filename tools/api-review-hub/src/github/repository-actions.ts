@@ -544,7 +544,6 @@ async function getOrCreatePullRequest(options: {
             head: options.reviewBranch,
             base: options.baseBranch,
             body,
-            draft: true,
         }),
     });
 }
