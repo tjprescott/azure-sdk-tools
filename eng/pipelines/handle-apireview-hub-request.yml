@@ -32,6 +32,15 @@ parameters:
   - name: completionCallbackUrl
     type: string
     default: 'https://api-review-hub-staging.azurewebsites.net/api/operations/'
+  - name: resultArtifactName
+    type: string
+    default: 'apireview-result'
+  - name: baseArtifactName
+    type: string
+    default: 'apireview-base'
+  - name: targetArtifactName
+    type: string
+    default: 'apireview-target'
 
 jobs:
 # The language value is validated above. Each supported language must provide:
@@ -95,8 +104,8 @@ jobs:
           $targetMetadataPath = '$(Build.ArtifactStagingDirectory)/target/artifact-metadata.json'
           $targetMetadata = Get-Content -Raw -Path $targetMetadataPath | ConvertFrom-Json
           $artifacts = [ordered]@{
-            target = 'apireview-target'
-            result = 'apireview-result'
+            target = '${{ parameters.targetArtifactName }}'
+            result = '${{ parameters.resultArtifactName }}'
           }
 
           $baseVersion = ''
@@ -105,7 +114,7 @@ jobs:
             $baseMetadataPath = '$(Build.ArtifactStagingDirectory)/base/artifact-metadata.json'
             $baseMetadata = Get-Content -Raw -Path $baseMetadataPath | ConvertFrom-Json
             $baseVersion = $baseMetadata.version
-            $artifacts.base = 'apireview-base'
+            $artifacts.base = '${{ parameters.baseArtifactName }}'
 
             $baseHash = (Get-FileHash -Algorithm SHA256 -Path '$(Build.ArtifactStagingDirectory)/base/api.md').Hash
             $targetHash = (Get-FileHash -Algorithm SHA256 -Path '$(Build.ArtifactStagingDirectory)/target/api.md').Hash
@@ -147,7 +156,7 @@ jobs:
             targetRef = '${{ parameters.targetRef }}'
             status = 'failed'
             artifacts = [ordered]@{
-              result = 'apireview-result'
+              result = '${{ parameters.resultArtifactName }}'
             }
           }
 
@@ -161,21 +170,21 @@ jobs:
         condition: and(succeeded(), eq('${{ parameters.requestMode }}', 'create'))
         inputs:
           pathtoPublish: '$(Build.ArtifactStagingDirectory)/base'
-          artifactName: 'apireview-base'
+          artifactName: '${{ parameters.baseArtifactName }}'
 
       - task: PublishBuildArtifacts@1
         displayName: 'Publish target API review bundle'
         condition: succeeded()
         inputs:
           pathtoPublish: '$(Build.ArtifactStagingDirectory)/target'
-          artifactName: 'apireview-target'
+          artifactName: '${{ parameters.targetArtifactName }}'
 
       - task: PublishBuildArtifacts@1
         displayName: 'Publish API review result summary'
         condition: succeededOrFailed()
         inputs:
           pathtoPublish: '$(Build.ArtifactStagingDirectory)/result'
-          artifactName: 'apireview-result'
+          artifactName: '${{ parameters.resultArtifactName }}'
 
       # Completion notification is intentionally sent after artifacts are
       # published. API Review Hub treats this as a signal, then verifies the
@@ -220,16 +229,16 @@ jobs:
               project = '$(System.TeamProject)'
               result = '$(Agent.JobStatus)'
               artifacts = [ordered]@{
-                result = 'apireview-result'
+                result = '${{ parameters.resultArtifactName }}'
               }
             }
 
             if ('$(Agent.JobStatus)' -eq 'Succeeded' -or '$(Agent.JobStatus)' -eq 'SucceededWithIssues') {
-              $body.artifacts.target = 'apireview-target'
+              $body.artifacts.target = '${{ parameters.targetArtifactName }}'
             }
 
             if (('${{ parameters.requestMode }}' -eq 'create') -and ('$(Agent.JobStatus)' -eq 'Succeeded' -or '$(Agent.JobStatus)' -eq 'SucceededWithIssues')) {
-              $body.artifacts.base = 'apireview-base'
+              $body.artifacts.base = '${{ parameters.baseArtifactName }}'
             }
 
             $completionCallbackUrl = '${{ parameters.completionCallbackUrl }}'

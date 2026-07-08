@@ -34,10 +34,15 @@ export interface ReviewPullRequestRecord {
     readonly approval: ApprovalRecord;
     readonly createdOn: string;
     readonly lastUpdatedOn: string;
+    readonly deletedOn?: string;
 }
 
 export type ReviewPullRequestStatus = "draft" | "open" | "closed" | "merged";
 export type ApprovalStatus = "approved" | "rejected" | "revoked" | "pending";
+
+export interface RecordQueryOptions {
+    readonly includeDeleted?: boolean;
+}
 
 export interface ApprovalRecord {
     readonly packageName: string;
@@ -71,7 +76,7 @@ export async function saveReviewPullRequestRecord(request: SaveReviewPullRequest
     const repositoryFullName = `${request.reviewPullRequest.repository.owner}/${request.reviewPullRequest.repository.repo}`;
     const pullRequestNo = String(request.reviewPullRequest.number);
     const container = await getReviewPullRequestsContainer();
-    const existingRecord = await readReviewPullRequestRecord(container, pullRequestNo, githubRepositoryId);
+    const existingRecord = await readReviewPullRequestRecord(container, pullRequestNo, githubRepositoryId, { includeDeleted: true });
     const record: ReviewPullRequestRecord = {
         id: pullRequestNo,
         packageVersionId: request.packageVersionId,
@@ -111,14 +116,16 @@ export async function saveReviewPullRequestRecord(request: SaveReviewPullRequest
 export async function getReviewPullRequestRecord(
     githubRepositoryId: number,
     pullRequestNumber: number,
+    options: RecordQueryOptions = {},
 ): Promise<ReviewPullRequestRecord | undefined> {
     const container = await getReviewPullRequestsContainer();
-    return readReviewPullRequestRecord(container, String(pullRequestNumber), githubRepositoryId);
+    return readReviewPullRequestRecord(container, String(pullRequestNumber), githubRepositoryId, options);
 }
 
 export async function findOpenReviewPullRequestsByWorkingBranch(
     githubRepositoryId: number,
     workingBranch: string,
+    options: RecordQueryOptions = {},
 ): Promise<ReviewPullRequestRecord[]> {
     const container = await getReviewPullRequestsContainer();
     const response = await container.items.query<ReviewPullRequestRecord>({
@@ -127,6 +134,7 @@ export async function findOpenReviewPullRequestsByWorkingBranch(
             WHERE pr.githubRepositoryId = @githubRepositoryId
                 AND pr.workingBranch = @workingBranch
                 AND pr.pullRequestStatus IN ("open", "draft")
+                ${getDeletedRecordFilter("pr", options)}
         `,
         parameters: [
             { name: "@githubRepositoryId", value: githubRepositoryId },
@@ -140,6 +148,7 @@ export async function findOpenReviewPullRequestsByWorkingBranch(
 export async function findOpenReviewPullRequestsByBaseBranch(
     githubRepositoryId: number,
     baseBranch: string,
+    options: RecordQueryOptions = {},
 ): Promise<ReviewPullRequestRecord[]> {
     const container = await getReviewPullRequestsContainer();
     const response = await container.items.query<ReviewPullRequestRecord>({
@@ -148,6 +157,7 @@ export async function findOpenReviewPullRequestsByBaseBranch(
             WHERE pr.githubRepositoryId = @githubRepositoryId
                 AND pr.baseBranch = @baseBranch
                 AND pr.pullRequestStatus IN ("open", "draft")
+                ${getDeletedRecordFilter("pr", options)}
         `,
         parameters: [
             { name: "@githubRepositoryId", value: githubRepositoryId },
@@ -251,6 +261,7 @@ export async function findLatestApprovalRecord(
     language: string,
     packageName: string,
     version: string,
+    options: RecordQueryOptions = {},
 ): Promise<ApprovalRecord | undefined> {
     const container = await getReviewPullRequestsContainer();
     const response = await container.items.query<ReviewPullRequestRecord>({
@@ -259,6 +270,7 @@ export async function findLatestApprovalRecord(
             WHERE pr.language = @language
                 AND pr.packageName = @packageName
                 AND pr.targetVersion = @version
+                ${getDeletedRecordFilter("pr", options)}
         `,
         parameters: [
             { name: "@language", value: language },
@@ -293,10 +305,15 @@ function createApprovalRecord(
     };
 }
 
-async function readReviewPullRequestRecord(container: Container, pullRequestNo: string, githubRepositoryId: number): Promise<ReviewPullRequestRecord | undefined> {
+async function readReviewPullRequestRecord(
+    container: Container,
+    pullRequestNo: string,
+    githubRepositoryId: number,
+    options: RecordQueryOptions = {},
+): Promise<ReviewPullRequestRecord | undefined> {
     try {
         const response = await container.item(pullRequestNo, githubRepositoryId).read<ReviewPullRequestRecord>();
-        return response.resource;
+        return isDeletedRecordHidden(response.resource, options) ? undefined : response.resource;
     } catch (error) {
         if (isNotFound(error)) {
             return undefined;
@@ -322,4 +339,12 @@ function isNotFound(error: unknown): boolean {
     return typeof error === "object"
         && error !== null
         && (("code" in error && error.code === 404) || ("statusCode" in error && error.statusCode === 404));
+}
+
+function isDeletedRecordHidden(record: ReviewPullRequestRecord | undefined, options: RecordQueryOptions): boolean {
+    return !options.includeDeleted && record?.deletedOn !== undefined;
+}
+
+function getDeletedRecordFilter(alias: string, options: RecordQueryOptions): string {
+    return options.includeDeleted ? "" : `AND NOT IS_DEFINED(${alias}.deletedOn)`;
 }

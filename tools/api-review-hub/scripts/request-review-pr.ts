@@ -6,7 +6,7 @@ import type {
 import { getAuthorization } from "./auth.js";
 
 const endpoint = (process.env.API_REVIEW_HUB_ENDPOINT ?? "https://api-review-hub-staging.azurewebsites.net").replace(/\/$/, "");
-const pollIntervalMs = Number(process.env.API_REVIEW_HUB_POLL_INTERVAL_MS ?? 5_000);
+const pollIntervalMs = Number(process.env.API_REVIEW_HUB_POLL_INTERVAL_MS ?? 30_000);
 
 const request: ReviewPullRequestCreationRequest = {
     language: "python",

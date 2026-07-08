@@ -8,6 +8,7 @@ import { SecretClient, type KeyVaultSecret } from "@azure/keyvault-secrets";
 import { getRequiredSetting } from "../config/settings.js";
 import { deleteGitBranch, getApiHashForPackageAtCommit, isArchitectReviewerForPackage, markReviewPullRequestOutOfDate } from "../github/repository-actions.js";
 import type { RepositoryRegistration } from "../models/models.js";
+import { upsertApprovalRecord } from "../services/approval-record-store.js";
 import {
     findOpenReviewPullRequestsByBaseBranch,
     findOpenReviewPullRequestsByWorkingBranch,
@@ -19,6 +20,7 @@ import {
     type ReviewPullRequestStatus,
 } from "../services/review-pr-store.js";
 import { acceptReviewPullRequestUpdate } from "../services/review-pr-service.js";
+import { tryCreateWebhookEventRecord, updateWebhookEventRecord } from "../services/webhook-event-store.js";
 import { getRequiredHeader, logRequest, readRequestBody, sendEmpty, sendError } from "./http.js";
 
 interface GitHubWebhookPayload {
@@ -83,6 +85,12 @@ interface WebhookSecretLookupResult extends WebhookSecretKey {
     readonly enabled?: boolean;
     readonly expiresOn?: string;
     readonly notBefore?: string;
+}
+
+interface GitHubSignatureValidationResult {
+    readonly valid: boolean;
+    readonly result?: "invalidSignature" | "invalidSignatureFormat" | "unusableWebhookSecret";
+    readonly failureReason?: string;
 }
 
 const credential = new DefaultAzureCredential();
@@ -164,8 +172,28 @@ export async function handleGitHubWebhookEvent(request: IncomingMessage, respons
         return;
     }
 
+    const decodedPayload = decodeGitHubWebhookPayload(payload, contentType);
+
     const repositoryRegistration = await getRepositoryRegistration(githubRepositoryId);
     if (!repositoryRegistration) {
+        await tryCreateWebhookEventRecord({
+            deliveryId,
+            githubRepositoryId,
+            githubWebhookId,
+            repositoryFullName: decodedPayload?.repository?.full_name,
+            eventType,
+            contentType,
+            action: decodedPayload?.action,
+            sender: decodedPayload?.sender?.login,
+            pullRequestNumber: decodedPayload?.pull_request?.number,
+            reviewId: decodedPayload?.review?.id,
+            ref: decodedPayload?.ref,
+            before: decodedPayload?.before,
+            after: decodedPayload?.after,
+            status: "rejected",
+            result: "unknownRepository",
+            failureReason: "The GitHub repository is not registered for webhook processing.",
+        });
         logWebhookRegistrationError("unknownRepository", eventType, deliveryId, contentType, payload.length, githubRepositoryId, githubWebhookId);
         sendError(response, 401, "unknownRepository", "The GitHub repository is not registered for webhook processing.");
         return;
@@ -181,14 +209,36 @@ export async function handleGitHubWebhookEvent(request: IncomingMessage, respons
         return;
     }
 
-    if (!(await isValidGitHubSignature(signatureSha256, payload, repositoryRegistration))) {
-        logRejectedWebhookDelivery("invalidSignature", eventType, deliveryId, signatureSha256, contentType, payload.length);
+    const signatureValidation = await validateGitHubSignature(signatureSha256, payload, repositoryRegistration);
+    if (!signatureValidation.valid) {
+        await tryCreateWebhookEventRecord({
+            deliveryId,
+            githubRepositoryId,
+            githubWebhookId,
+            repositoryFullName: repositoryRegistration.repositoryFullName,
+            eventType,
+            contentType,
+            status: "rejected",
+            result: signatureValidation.result ?? "invalidSignature",
+            failureReason: signatureValidation.failureReason ?? "The GitHub webhook signature is invalid for the registered repository secrets.",
+        });
+        logRejectedWebhookDelivery(signatureValidation.result ?? "invalidSignature", eventType, deliveryId, signatureSha256, contentType, payload.length);
         sendError(response, 401, "invalidSignature", "The GitHub webhook signature is invalid.", "X-Hub-Signature-256");
         return;
     }
 
-    const decodedPayload = decodeGitHubWebhookPayload(payload, contentType);
     if (!decodedPayload) {
+        await tryCreateWebhookEventRecord({
+            deliveryId,
+            githubRepositoryId,
+            githubWebhookId,
+            repositoryFullName: repositoryRegistration.repositoryFullName,
+            eventType,
+            contentType,
+            status: "rejected",
+            result: "invalidBody",
+            failureReason: "The GitHub webhook payload must be valid JSON.",
+        });
         logRejectedWebhookDelivery("invalidBody", eventType, deliveryId, signatureSha256, contentType, payload.length);
         sendError(response, 400, "invalidBody", "The GitHub webhook payload must be valid JSON.");
         return;
@@ -225,7 +275,58 @@ export async function handleGitHubWebhookEvent(request: IncomingMessage, respons
         ref: decodedPayload.ref,
     });
 
-    await processGitHubWebhookEvent(eventType, deliveryId, githubRepositoryId, decodedPayload);
+    const webhookEventRecord = await tryCreateWebhookEventRecord({
+        deliveryId,
+        githubRepositoryId,
+        githubWebhookId,
+        repositoryFullName: decodedPayload.repository?.full_name,
+        eventType,
+        contentType,
+        action: decodedPayload.action,
+        sender: decodedPayload.sender?.login,
+        pullRequestNumber: decodedPayload.pull_request?.number,
+        reviewId: decodedPayload.review?.id,
+        ref: decodedPayload.ref,
+        before: decodedPayload.before,
+        after: decodedPayload.after,
+        status: "accepted",
+    });
+
+    if (!webhookEventRecord) {
+        logRequest("POST /api/github/webhook-events duplicate", {
+            eventType,
+            deliveryId,
+            githubRepositoryId,
+            repository: decodedPayload.repository?.full_name,
+        });
+        sendEmpty(response, 202);
+        return;
+    }
+
+    await updateWebhookEventRecord({
+        deliveryId,
+        githubRepositoryId,
+        status: "processing",
+    });
+
+    try {
+        await processGitHubWebhookEvent(eventType, deliveryId, githubRepositoryId, decodedPayload);
+        await updateWebhookEventRecord({
+            deliveryId,
+            githubRepositoryId,
+            status: "processed",
+            result: "processed",
+        });
+    } catch (error) {
+        await updateWebhookEventRecord({
+            deliveryId,
+            githubRepositoryId,
+            status: "failed",
+            result: "failed",
+            failureReason: error instanceof Error ? error.message : String(error),
+        });
+        throw error;
+    }
 
     sendEmpty(response, 202);
 }
@@ -433,6 +534,16 @@ async function handlePullRequestReviewWebhookEvent(deliveryId: string, githubRep
         commitSha: reviewCommitSha,
     });
     const updatedRecord = await updateReviewPullRequestApprovalStatus(githubRepositoryId, pullRequestNumber, approvalStatus, reviewer, apiHash, reviewCommitSha);
+    const approvalRecord = updatedRecord
+        ? await upsertApprovalRecord({
+            reviewPullRequest: updatedRecord,
+            apiHash,
+            commitSha: reviewCommitSha,
+            status: approvalStatus,
+            githubReviewId: payload.review?.id,
+            lastUpdatedBy: reviewer,
+        })
+        : undefined;
     console.log(JSON.stringify({
         event: updatedRecord ? "reviewPullRequestApprovalWebhookApplied" : "pullRequestReviewWebhookIgnoredForMissingReviewPullRequest",
         deliveryId,
@@ -445,6 +556,7 @@ async function handlePullRequestReviewWebhookEvent(deliveryId: string, githubRep
         reviewer,
         approvalStatus,
         apiHash,
+        approvalRecordId: approvalRecord?.id,
     }));
 }
 
@@ -675,14 +787,18 @@ function logWebhookRegistrationError(
     );
 }
 
-async function isValidGitHubSignature(
+async function validateGitHubSignature(
     signatureSha256: string,
     payload: Buffer,
     repositoryRegistration: RepositoryRegistration,
-): Promise<boolean> {
+): Promise<GitHubSignatureValidationResult> {
     const expectedSignature = parseGitHubSha256Signature(signatureSha256);
     if (!expectedSignature) {
-        return false;
+        return {
+            valid: false,
+            result: "invalidSignatureFormat",
+            failureReason: "The GitHub webhook signature header is not a valid sha256 signature.",
+        };
     }
 
     const webhookSecretKeys = [
@@ -690,6 +806,7 @@ async function isValidGitHubSignature(
         { name: repositoryRegistration.lastWebhookSecretKey, role: "previous" },
     ] satisfies WebhookSecretKey[];
     const failedSecretKeys: WebhookSecretLookupResult[] = [];
+    let usableSecretCount = 0;
 
     for (const webhookSecretKey of webhookSecretKeys) {
         const secret = await getWebhookSecret(webhookSecretKey);
@@ -697,10 +814,11 @@ async function isValidGitHubSignature(
             failedSecretKeys.push(secret);
             continue;
         }
+        usableSecretCount++;
         const actualSignature = createHmac("sha256", secret.value).update(payload).digest();
 
         if (actualSignature.length === expectedSignature.length && timingSafeEqual(actualSignature, expectedSignature)) {
-            return true;
+            return { valid: true };
         }
 
         failedSecretKeys.push({ ...webhookSecretKey, failureReason: "signatureMismatch" });
@@ -714,12 +832,27 @@ async function isValidGitHubSignature(
         }),
     );
 
-    return false;
+    if (usableSecretCount === 0) {
+        return {
+            valid: false,
+            result: "unusableWebhookSecret",
+            failureReason: `No registered webhook secret is currently usable: ${getWebhookSecretFailureSummary(failedSecretKeys)}.`,
+        };
+    }
+
+    return {
+        valid: false,
+        result: "invalidSignature",
+        failureReason: "The GitHub webhook signature did not match any usable registered repository secret.",
+    };
+}
+
+function getWebhookSecretFailureSummary(secrets: WebhookSecretLookupResult[]): string {
+    return secrets.map((secret) => `${secret.role}:${secret.failureReason ?? "unknown"}`).join(", ");
 }
 
 function toWebhookSecretFailureLog(secret: WebhookSecretLookupResult): Record<string, unknown> {
     return {
-        name: secret.name,
         role: secret.role,
         failureReason: secret.failureReason,
         enabled: secret.enabled,
@@ -803,11 +936,18 @@ function isNotFound(error: unknown): boolean {
     return typeof error === "object" && error !== null && "statusCode" in error && error.statusCode === 404;
 }
 
-async function getRepositoryRegistration(githubRepositoryId: number): Promise<RepositoryRegistration | undefined> {
+interface RepositoryRegistrationQueryOptions {
+    readonly includeDeleted?: boolean;
+}
+
+async function getRepositoryRegistration(
+    githubRepositoryId: number,
+    options: RepositoryRegistrationQueryOptions = {},
+): Promise<RepositoryRegistration | undefined> {
     const container = await getRepositoryRegistrationsContainer();
     try {
         const response = await container.item(String(githubRepositoryId), githubRepositoryId).read<RepositoryRegistration>();
-        return response.resource;
+        return isDeletedRepositoryRegistrationHidden(response.resource, options) ? undefined : response.resource;
     } catch (error) {
         if (isNotFound(error)) {
             return undefined;
@@ -836,6 +976,13 @@ function parseGitHubId(value: string): number | undefined {
 
     const parsed = Number(value);
     return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function isDeletedRepositoryRegistrationHidden(
+    record: RepositoryRegistration | undefined,
+    options: RepositoryRegistrationQueryOptions,
+): boolean {
+    return !options.includeDeleted && record?.deletedOn !== undefined;
 }
 
 function decodeGitHubWebhookPayload(payload: Buffer, contentType: string | undefined): GitHubWebhookPayload | undefined {

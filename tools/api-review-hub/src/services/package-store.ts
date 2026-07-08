@@ -19,6 +19,7 @@ export interface PackageRecord {
     readonly packageName: string;
     readonly createdOn: string;
     readonly lastUpdatedOn: string;
+    readonly deletedOn?: string;
 }
 
 export interface PackageVersionRecord {
@@ -29,9 +30,14 @@ export interface PackageVersionRecord {
     readonly createdOn: string;
     readonly lastUpdatedOn: string;
     readonly releasedOn?: string;
+    readonly deletedOn?: string;
 }
 
 export type PackageVersionKind = "stable" | "preview";
+
+interface RecordQueryOptions {
+    readonly includeDeleted?: boolean;
+}
 
 export interface UpsertPackageVersionRequest {
     readonly language: string;
@@ -82,7 +88,7 @@ export async function markPackageVersionReleased(language: string, packageName: 
 async function upsertPackage(language: string, packageName: string): Promise<PackageRecord> {
     const now = new Date().toISOString();
     const container = await getPackagesContainer();
-    const existingRecord = await findPackageRecord(container, language, packageName);
+    const existingRecord = await findPackageRecord(container, language, packageName, { includeDeleted: true });
     const record: PackageRecord = {
         id: existingRecord?.id ?? randomUUID(),
         language,
@@ -104,7 +110,7 @@ async function upsertPackage(language: string, packageName: string): Promise<Pac
 async function upsertPackageVersionRecord(packageRecord: PackageRecord, version: string): Promise<PackageVersionRecord> {
     const now = new Date().toISOString();
     const container = await getPackageVersionsContainer();
-    const existingRecord = await findPackageVersionRecord(container, packageRecord.id, version);
+    const existingRecord = await findPackageVersionRecord(container, packageRecord.id, version, { includeDeleted: true });
     const record: PackageVersionRecord = {
         id: existingRecord?.id ?? randomUUID(),
         packageId: packageRecord.id,
@@ -126,12 +132,18 @@ async function upsertPackageVersionRecord(packageRecord: PackageRecord, version:
     return record;
 }
 
-async function findPackageRecord(container: Container, language: string, packageName: string): Promise<PackageRecord | undefined> {
+async function findPackageRecord(
+    container: Container,
+    language: string,
+    packageName: string,
+    options: RecordQueryOptions = {},
+): Promise<PackageRecord | undefined> {
     const response = await container.items.query<PackageRecord>({
         query: `
             SELECT * FROM packages p
             WHERE p.language = @language
                 AND p.packageName = @packageName
+                ${getDeletedRecordFilter("p", options)}
         `,
         parameters: [
             { name: "@language", value: language },
@@ -142,12 +154,18 @@ async function findPackageRecord(container: Container, language: string, package
     return response.resources[0];
 }
 
-async function findPackageVersionRecord(container: Container, packageId: string, version: string): Promise<PackageVersionRecord | undefined> {
+async function findPackageVersionRecord(
+    container: Container,
+    packageId: string,
+    version: string,
+    options: RecordQueryOptions = {},
+): Promise<PackageVersionRecord | undefined> {
     const response = await container.items.query<PackageVersionRecord>({
         query: `
             SELECT * FROM packageVersions pv
             WHERE pv.packageId = @packageId
                 AND pv.version = @version
+                ${getDeletedRecordFilter("pv", options)}
         `,
         parameters: [
             { name: "@packageId", value: packageId },
@@ -184,5 +202,9 @@ async function getPackageVersionsContainer(): Promise<Container> {
 
 function getPackageVersionKind(version: string): PackageVersionKind {
     return /(?:^|[.-])(?:alpha|beta|preview|rc|dev)\d*(?:[.-]|$)|\d(?:a|b|rc)\d+$/i.test(version) ? "preview" : "stable";
+}
+
+function getDeletedRecordFilter(alias: string, options: RecordQueryOptions): string {
+    return options.includeDeleted ? "" : `AND NOT IS_DEFINED(${alias}.deletedOn)`;
 }
 

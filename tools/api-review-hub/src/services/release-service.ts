@@ -1,6 +1,6 @@
-import type { MarkPackageVersionReleasedRequest, ReleaseGateDecision } from "../models/models.js";
+import type { ApprovalRecord, MarkPackageVersionReleasedRequest, ReleaseGateDecision } from "../models/models.js";
+import { findLatestApprovalRecordForApiHash } from "./approval-record-store.js";
 import { markPackageVersionReleased as markStoredPackageVersionReleased } from "./package-store.js";
-import { findLatestApprovalRecord, type ApprovalRecord } from "./review-pr-store.js";
 
 interface ReleaseGateRequest {
     readonly language: string;
@@ -10,28 +10,20 @@ interface ReleaseGateRequest {
 }
 
 export async function evaluateReleaseGate(request: ReleaseGateRequest): Promise<ReleaseGateDecision> {
-    const approval = await findLatestApprovalRecord(request.language, request.packageName, request.version);
+    if (!request.apiHash) {
+        return {
+            allowed: false,
+            reason: "missingApiHash",
+            approval: createReleaseGateApproval(request, "pending"),
+        };
+    }
+
+    const approval = await findLatestApprovalRecordForApiHash(request.language, request.packageName, request.version, request.apiHash);
     if (!approval) {
         return {
             allowed: false,
             reason: "missingApproval",
             approval: createReleaseGateApproval(request, "pending"),
-        };
-    }
-
-    if (!request.apiHash) {
-        return {
-            allowed: false,
-            reason: "missingApiHash",
-            approval,
-        };
-    }
-
-    if (approval.apiHash !== request.apiHash) {
-        return {
-            allowed: false,
-            reason: "staleArtifact",
-            approval,
         };
     }
 

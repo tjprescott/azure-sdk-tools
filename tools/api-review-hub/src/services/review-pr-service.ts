@@ -9,7 +9,16 @@ import type {
     ReviewPullRequestCreationRequest,
 } from "../models/models.js";
 import { clearReviewPullRequestOutOfDate, gitReferenceExists, publishApiReviewPullRequest, publishUpdatedApiReviewArtifacts } from "../github/repository-actions.js";
-import { downloadBuildArtifact, type DownloadedAdoArtifact, queueApiReviewPipeline } from "./ado-pipeline-service.js";
+import { apiReviewPipelineArtifactNames, downloadBuildArtifact, getAdoPipelineRunStatus, type DownloadedAdoArtifact, queueApiReviewPipeline } from "./ado-pipeline-service.js";
+import {
+    findOutstandingAdoOperations,
+    getAdoOperation,
+    saveAdoOperation,
+    softDeleteCompletedAdoOperation,
+    toOperationStatus,
+    type AdoOperationRecord,
+    type AdoOperationQueuedReason,
+} from "./ado-operation-store.js";
 import { upsertPackageVersion } from "./package-store.js";
 import { saveReviewPullRequestRecord, type ReviewPullRequestRecord } from "./review-pr-store.js";
 
@@ -33,10 +42,6 @@ interface ReviewPullRequestUpdateRequest {
     readonly reviewPullRequest: ReviewPullRequestRecord;
     readonly targetRef: string;
 }
-
-const operations = new Map<string, OperationStatus>();
-const operationRequests = new Map<string, ReviewPullRequestCreationRequest>();
-const operationUpdateRequests = new Map<string, ReviewPullRequestUpdateRequest>();
 
 export class OperationUpdateConflictError extends Error {
     public constructor(message: string) {
@@ -95,7 +100,7 @@ export async function acceptReviewPullRequestCreation(
         runUrl: queuedRun.runUrl,
     }));
 
-    operations.set(operationId, {
+    const operation: OperationStatus = {
         operationId,
         status: "running",
         mode: "create",
@@ -105,8 +110,8 @@ export async function acceptReviewPullRequestCreation(
         pipelineId,
         buildId: queuedRun.buildId,
         pipelineUrl: queuedRun.runUrl,
-    });
-    operationRequests.set(operationId, request);
+    };
+    await saveOperation(operation, "createReviewPullRequest", { creationRequest: request });
 
     return { operationId, status: "accepted" };
 }
@@ -183,7 +188,7 @@ export async function acceptReviewPullRequestUpdate(
         pullRequestNumber: reviewPullRequest.pullRequestNumber,
     }));
 
-    operations.set(operationId, {
+    const operation: OperationStatus = {
         operationId,
         status: "running",
         mode: "update",
@@ -193,20 +198,30 @@ export async function acceptReviewPullRequestUpdate(
         pipelineId,
         buildId: queuedRun.buildId,
         pipelineUrl: queuedRun.runUrl,
-    });
-    operationUpdateRequests.set(operationId, { reviewPullRequest, targetRef });
+    };
+    const updateRequest = { reviewPullRequest, targetRef };
+    await saveOperation(operation, "updateReviewPullRequest", { updateRequest });
 
     return { operationId, status: "accepted", pipelineUrl: queuedRun.runUrl };
 }
 
-export function getOperation(operationId: string): OperationStatus | undefined {
-    return operations.get(operationId);
+export async function getOperation(operationId: string): Promise<OperationStatus | undefined> {
+    const record = await getAdoOperation(operationId);
+    if (!record) {
+        return undefined;
+    }
+
+    return toOperationStatus(record);
 }
 
-export function acceptOperationUpdate(operationId: string, update: OperationUpdate): OperationStatus | undefined {
-    const operation = operations.get(operationId);
+export async function acceptOperationUpdate(operationId: string, update: OperationUpdate): Promise<OperationStatus | undefined> {
+    const operation = await getAdoOperation(operationId);
     if (!operation) {
         return undefined;
+    }
+
+    if (operation.status === "succeeded" || operation.status === "failed") {
+        return operation;
     }
 
     if (operation.buildId && update.buildId !== operation.buildId) {
@@ -222,15 +237,40 @@ export function acceptOperationUpdate(operationId: string, update: OperationUpda
     }
 
     const updatedOperation: OperationStatus = {
-        ...operation,
+        ...toOperationStatus(operation),
         operationId,
         status: "running",
         failureReason: update.result === "Succeeded" || update.result === "SucceededWithIssues"
             ? operation.failureReason
             : `Artifact generation completed with result ${update.result}.`,
     };
-    operations.set(operationId, updatedOperation);
+    await saveOperation(updatedOperation, getQueuedReason(updatedOperation.mode));
     return updatedOperation;
+}
+
+export async function recoverOutstandingAdoOperations(): Promise<void> {
+    const outstandingOperations = await findOutstandingAdoOperations();
+    console.log(JSON.stringify({
+        event: "adoOperationRecoveryStarted",
+        operationCount: outstandingOperations.length,
+    }));
+
+    for (const operation of outstandingOperations) {
+        try {
+            await recoverOutstandingAdoOperation(operation);
+        } catch (error) {
+            console.error(JSON.stringify({
+                event: "adoOperationRecoveryOperationFailed",
+                operationId: operation.operationId,
+                error: error instanceof Error ? error.message : String(error),
+            }));
+        }
+    }
+
+    console.log(JSON.stringify({
+        event: "adoOperationRecoveryCompleted",
+        operationCount: outstandingOperations.length,
+    }));
 }
 
 export async function processOperationUpdateResults(operationId: string, update: OperationUpdate): Promise<void> {
@@ -241,9 +281,14 @@ export async function processOperationUpdateResults(operationId: string, update:
         pipelineProject: update.project,
     }));
 
+    const operation = await getAdoOperation(operationId);
+    if (!operation) {
+        throw new Error(`Operation '${operationId}' was not found.`);
+    }
+
     try {
-        operations.set(operationId, {
-            ...operations.get(operationId),
+        await setOperationStatus({
+            ...toOperationStatus(operation),
             operationId,
             status: "running",
             mode: update.mode,
@@ -253,17 +298,17 @@ export async function processOperationUpdateResults(operationId: string, update:
         });
 
         const resultSummary = await downloadResultSummary(update.project, update.buildId, update.artifacts.result);
-        verifyResultSummary(operationId, update, resultSummary);
+        verifyResultSummary(operation, update, resultSummary);
 
         if (!isSuccessfulAzureDevOpsResult(update.result)) {
             const failureReason = getOperationUpdateFailureReason(update, resultSummary);
-            operations.set(operationId, {
-                ...operations.get(operationId),
+            await setOperationStatus({
+                ...toOperationStatus(operation),
                 operationId,
                 status: "failed",
                 mode: update.mode,
                 language: update.language,
-                packageName: operations.get(operationId)?.packageName ?? resultSummary.packageName,
+                packageName: operation.packageName ?? resultSummary.packageName,
                 pipelineProject: update.project,
                 buildId: update.buildId,
                 failureReason,
@@ -272,7 +317,7 @@ export async function processOperationUpdateResults(operationId: string, update:
         }
 
         if (update.mode === "update") {
-            await processReviewPullRequestUpdateResults(operationId, update, resultSummary);
+            await processReviewPullRequestUpdateResults(operation, update, resultSummary);
             return;
         }
 
@@ -290,8 +335,8 @@ export async function processOperationUpdateResults(operationId: string, update:
             throw new Error("The baseline and target API artifacts are identical; no review pull request was created.");
         }
 
-        const repository = resolveRepository(operationId, resultSummary);
-        const targetBranch = operationRequests.get(operationId)?.targetBranch.name ?? getRequiredString(resultSummary.targetRef, "result-summary.targetRef");
+        const repository = resolveRepository(operation, resultSummary);
+        const targetBranch = operation.creationRequest?.targetBranch.name ?? getRequiredString(resultSummary.targetRef, "result-summary.targetRef");
         const packageName = getRequiredString(resultSummary.packageName, "result-summary.packageName");
         const baseRef = getRequiredString(resultSummary.baseRef ?? baseArtifact.metadata.ref, "result-summary.baseRef");
         const targetRef = getRequiredString(resultSummary.targetRef ?? targetArtifact.metadata.ref, "result-summary.targetRef");
@@ -349,8 +394,8 @@ export async function processOperationUpdateResults(operationId: string, update:
             reviewPullRequest,
         });
 
-        operations.set(operationId, {
-            ...operations.get(operationId),
+        await setOperationStatus({
+            ...toOperationStatus(operation),
             operationId,
             status: "succeeded",
             mode: update.mode,
@@ -361,6 +406,7 @@ export async function processOperationUpdateResults(operationId: string, update:
             reviewPullRequest,
             failureReason: undefined,
         });
+        await softDeleteCompletedAdoOperation(operationId);
 
         console.log(JSON.stringify({
             event: "operationUpdateProcessingSucceeded",
@@ -370,8 +416,8 @@ export async function processOperationUpdateResults(operationId: string, update:
         }));
     } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        operations.set(operationId, {
-            ...operations.get(operationId),
+        await setOperationStatus({
+            ...toOperationStatus(operation),
             operationId,
             status: "failed",
             mode: update.mode,
@@ -380,14 +426,62 @@ export async function processOperationUpdateResults(operationId: string, update:
             buildId: update.buildId,
             failureReason: message,
         });
+        await softDeleteCompletedAdoOperation(operationId);
         throw error;
     }
 }
 
-async function processReviewPullRequestUpdateResults(operationId: string, update: OperationUpdate, resultSummary: ResultSummary): Promise<void> {
-    const updateRequest = operationUpdateRequests.get(operationId);
+async function recoverOutstandingAdoOperation(operation: AdoOperationRecord): Promise<void> {
+    if (!operation.pipelineProject || !operation.pipelineId || !operation.buildId || !operation.mode || !operation.language) {
+        console.warn(JSON.stringify({
+            event: "adoOperationRecoverySkipped",
+            operationId: operation.operationId,
+            reason: "missingPipelineMetadata",
+        }));
+        return;
+    }
+
+    const runStatus = await getAdoPipelineRunStatus(operation.pipelineProject, operation.pipelineId, operation.buildId);
+    console.log(JSON.stringify({
+        event: "adoOperationRecoveryRunStatus",
+        operationId: operation.operationId,
+        pipelineProject: operation.pipelineProject,
+        pipelineId: operation.pipelineId,
+        buildId: operation.buildId,
+        state: runStatus.state,
+        result: runStatus.result,
+    }));
+
+    if (runStatus.state !== "completed") {
+        return;
+    }
+
+    const result = toOperationUpdateResult(runStatus.result);
+    if (!result) {
+        console.warn(JSON.stringify({
+            event: "adoOperationRecoverySkipped",
+            operationId: operation.operationId,
+            reason: "unsupportedRunResult",
+            result: runStatus.result,
+        }));
+        return;
+    }
+
+    await processOperationUpdateResults(operation.operationId, {
+        operationId: operation.operationId,
+        mode: operation.mode,
+        language: operation.language,
+        buildId: operation.buildId,
+        project: operation.pipelineProject,
+        result,
+        artifacts: getDefaultArtifactNames(operation.mode),
+    });
+}
+
+async function processReviewPullRequestUpdateResults(operation: AdoOperationRecord, update: OperationUpdate, resultSummary: ResultSummary): Promise<void> {
+    const updateRequest = operation.updateRequest;
     if (!updateRequest) {
-        throw new Error(`Update operation '${operationId}' did not have an associated review pull request.`);
+        throw new Error(`Update operation '${operation.operationId}' did not have an associated review pull request.`);
     }
 
     const reviewPullRequest = updateRequest.reviewPullRequest;
@@ -411,9 +505,9 @@ async function processReviewPullRequestUpdateResults(operationId: string, update
             },
         });
 
-        operations.set(operationId, {
-            ...operations.get(operationId),
-            operationId,
+        await setOperationStatus({
+            ...toOperationStatus(operation),
+            operationId: operation.operationId,
             status: "succeeded",
             mode: update.mode,
             language: update.language,
@@ -428,10 +522,11 @@ async function processReviewPullRequestUpdateResults(operationId: string, update
             },
             failureReason: undefined,
         });
+        await softDeleteCompletedAdoOperation(operation.operationId);
 
         console.log(JSON.stringify({
             event: publishedUpdate.changed ? "reviewPullRequestUpdatePublished" : "reviewPullRequestUpdateNoChanges",
-            operationId,
+            operationId: operation.operationId,
             buildId: update.buildId,
             pullRequestNumber: reviewPullRequest.pullRequestNumber,
             reviewBranch: reviewPullRequest.reviewBranch,
@@ -443,11 +538,11 @@ async function processReviewPullRequestUpdateResults(operationId: string, update
             owner: repository.owner,
             repo: repository.repo,
             pullRequestNumber: reviewPullRequest.pullRequestNumber,
-            operationId,
+            operationId: operation.operationId,
         });
         console.log(JSON.stringify({
             event: "reviewPullRequestOutOfDateLabelRemoved",
-            operationId,
+            operationId: operation.operationId,
             pullRequestNumber: reviewPullRequest.pullRequestNumber,
         }));
     }
@@ -516,9 +611,9 @@ function getApiHash(apiMd: Buffer): string {
     return createHash("sha256").update(apiMd).digest("hex");
 }
 
-function verifyResultSummary(operationId: string, update: OperationUpdate, resultSummary: ResultSummary): void {
-    if (resultSummary.operationId && resultSummary.operationId !== operationId) {
-        throw new Error(`Result summary operationId '${resultSummary.operationId}' did not match callback operationId '${operationId}'.`);
+function verifyResultSummary(operation: AdoOperationRecord, update: OperationUpdate, resultSummary: ResultSummary): void {
+    if (resultSummary.operationId && resultSummary.operationId !== operation.operationId) {
+        throw new Error(`Result summary operationId '${resultSummary.operationId}' did not match callback operationId '${operation.operationId}'.`);
     }
 
     if (resultSummary.mode && resultSummary.mode !== update.mode) {
@@ -529,9 +624,56 @@ function verifyResultSummary(operationId: string, update: OperationUpdate, resul
         throw new Error(`Result summary language '${resultSummary.language}' did not match callback language '${update.language}'.`);
     }
 
-    const operation = operations.get(operationId);
     if (operation?.packageName && resultSummary.packageName && operation.packageName !== resultSummary.packageName) {
         throw new Error(`Result summary packageName '${resultSummary.packageName}' did not match operation packageName '${operation.packageName}'.`);
+    }
+}
+
+async function setOperationStatus(operation: OperationStatus): Promise<void> {
+    await saveOperation(operation, getQueuedReason(operation.mode));
+}
+
+async function saveOperation(
+    operation: OperationStatus,
+    queuedReason: AdoOperationQueuedReason,
+    requests: {
+        readonly creationRequest?: ReviewPullRequestCreationRequest;
+        readonly updateRequest?: ReviewPullRequestUpdateRequest;
+    } = {},
+): Promise<void> {
+    await saveAdoOperation({
+        ...operation,
+        queuedReason,
+        creationRequest: requests.creationRequest,
+        updateRequest: requests.updateRequest,
+    });
+}
+
+function getQueuedReason(mode: OperationStatus["mode"]): AdoOperationQueuedReason {
+    return mode === "update" ? "updateReviewPullRequest" : "createReviewPullRequest";
+}
+
+function getDefaultArtifactNames(mode: OperationUpdate["mode"]): OperationArtifactNames {
+    return mode === "create"
+    ? { result: apiReviewPipelineArtifactNames.result, base: apiReviewPipelineArtifactNames.base, target: apiReviewPipelineArtifactNames.target }
+    : { result: apiReviewPipelineArtifactNames.result, target: apiReviewPipelineArtifactNames.target };
+}
+
+function toOperationUpdateResult(result: string | undefined): OperationUpdate["result"] | undefined {
+    switch (result) {
+        case "succeeded":
+            return "Succeeded";
+        case "partiallySucceeded":
+        case "succeededWithIssues":
+            return "SucceededWithIssues";
+        case "failed":
+            return "Failed";
+        case "canceled":
+            return "Canceled";
+        case "skipped":
+            return "Skipped";
+        default:
+            return undefined;
     }
 }
 
@@ -569,8 +711,8 @@ function getRequiredUpdateArtifactName(artifacts: OperationArtifactNames): strin
     return artifacts.target;
 }
 
-function resolveRepository(operationId: string, resultSummary: ResultSummary): { owner: string; repo: string } {
-    const targetBranch = operationRequests.get(operationId)?.targetBranch;
+function resolveRepository(operation: AdoOperationRecord, resultSummary: ResultSummary): { owner: string; repo: string } {
+    const targetBranch = operation.creationRequest?.targetBranch;
     if (targetBranch) {
         return {
             owner: targetBranch.owner,

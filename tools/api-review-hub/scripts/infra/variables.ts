@@ -80,12 +80,24 @@ const suffixedVariableNames = new Set<string>([
 
 const cosmosContainers: readonly CosmosContainerConfig[] = [
     { name: "adoOperations", partitionKeyPath: "/operationId" },
+    { name: "approvalRecords", partitionKeyPath: "/packageVersionKey" },
     { name: "services", partitionKeyPath: "/id" },
     { name: "packages", partitionKeyPath: "/language" },
     { name: "packageVersions", partitionKeyPath: "/packageId" },
     { name: "reviewPullRequests", partitionKeyPath: "/githubRepositoryId" },
     { name: "webhookEvents", partitionKeyPath: "/githubRepositoryId" },
     { name: "repositoryRegistrations", partitionKeyPath: "/githubRepositoryId" },
+];
+
+const retentionSettings: readonly AppConfigurationSetting[] = [
+    { key: "retention:approvalRecords:days", value: "180" },
+    { key: "retention:services:days", value: "180" },
+    { key: "retention:packages:days", value: "180" },
+    { key: "retention:packageVersions:days", value: "180" },
+    { key: "retention:repositoryRegistrations:days", value: "90" },
+    { key: "retention:reviewPullRequests:days", value: "90" },
+    { key: "retention:adoOperations:days", value: "30" },
+    { key: "retention:webhookEvents:days", value: "30" },
 ];
 
 export async function loadVariables(path = process.env.VARIABLES_PATH ?? defaultVariablesPath): Promise<Variables> {
@@ -138,6 +150,7 @@ export async function loadVariables(path = process.env.VARIABLES_PATH ?? default
         { key: "github_app_key_name", value: githubAppKeyName },
         { key: "github_install_owner", value: githubInstallOwner },
         { key: "allowed_repository_owners", value: allowedRepositoryOwners },
+        ...retentionSettings,
     ];
 
     return {

@@ -7,6 +7,12 @@ const defaultAzureDevOpsProject = "internal";
 const defaultPipelineRefName = "refs/heads/arh/proofOfConcept";
 const credential = new DefaultAzureCredential();
 
+export const apiReviewPipelineArtifactNames = {
+    result: "apireview-result",
+    base: "apireview-base",
+    target: "apireview-target",
+} as const;
+
 export type AdoPipelineTemplateParameters = Record<string, unknown>;
 
 export interface QueueAdoPipelineRequest {
@@ -18,6 +24,15 @@ export interface QueueAdoPipelineRequest {
 
 export interface QueueAdoPipelineResult {
     readonly buildId: string;
+    readonly runUrl?: string;
+}
+
+export interface AdoPipelineRunStatus {
+    readonly buildId: string;
+    readonly pipelineProject: string;
+    readonly pipelineId: string;
+    readonly state?: string;
+    readonly result?: string;
     readonly runUrl?: string;
 }
 
@@ -44,6 +59,8 @@ const maxLoggedResponseBodyLength = 4000;
 interface AzureDevOpsRunResponse {
     readonly id?: number;
     readonly url?: string;
+    readonly state?: string;
+    readonly result?: string;
     readonly _links?: {
         readonly web?: {
             readonly href?: string;
@@ -222,6 +239,7 @@ export async function queueApiReviewPipeline(request: QueueApiReviewPipelineRequ
         apiReviewHubEndpoint,
         completionCallbackUrl,
         pipelineRefName,
+        artifactNames: apiReviewPipelineArtifactNames,
     }));
 
     return queueAdoPipeline({
@@ -308,6 +326,44 @@ export async function downloadBuildArtifact(project: string, buildId: string, ar
     return {
         name: artifact.name ?? artifactName,
         files,
+    };
+}
+
+export async function getAdoPipelineRunStatus(project: string, pipelineId: string, buildId: string): Promise<AdoPipelineRunStatus> {
+    const token = await getAzureDevOpsToken("adoPipelineRunStatusTokenRequested", project, buildId, "");
+    const organizationUrl = azureDevOpsOrganizationUrl.replace(/\/+$/, "");
+    const encodedProject = encodeURIComponent(project || defaultAzureDevOpsProject);
+    const encodedPipelineId = encodeURIComponent(pipelineId);
+    const encodedBuildId = encodeURIComponent(buildId);
+    const url = `${organizationUrl}/${encodedProject}/_apis/pipelines/${encodedPipelineId}/runs/${encodedBuildId}?api-version=7.1`;
+
+    console.log(JSON.stringify({
+        event: "adoPipelineRunStatusRequest",
+        pipelineProject: project || defaultAzureDevOpsProject,
+        pipelineId,
+        buildId,
+        url,
+    }));
+
+    const response = await fetch(url, {
+        headers: {
+            authorization: `Bearer ${token.token}`,
+        },
+    });
+
+    if (!response.ok) {
+        const responseBody = await readResponseBodyForLogging(response);
+        throw new AdoPipelineQueueError(`Azure DevOps returned ${response.status} ${response.statusText} while reading run ${buildId} for pipeline ${pipelineId}. Response body: ${responseBody}`);
+    }
+
+    const run = await response.json() as AzureDevOpsRunResponse;
+    return {
+        buildId: String(run.id ?? buildId),
+        pipelineProject: project || defaultAzureDevOpsProject,
+        pipelineId,
+        state: run.state,
+        result: run.result,
+        runUrl: run._links?.web?.href ?? run.url,
     };
 }
 

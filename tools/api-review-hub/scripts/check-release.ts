@@ -6,7 +6,7 @@ const releaseGateRequest = {
     language: "python",
     packageName: "azure-keyvault-keys",
     version: "4.12.0b3",
-    apiHash: "aef97d024f2a340bd992eff0001471606f8270c8d35a69635de9fb50152b9e01",
+    // apiHash: "aef97d024f2a340bd992eff0001471606f8270c8d35a69635de9fb50152b9e01",
 };
 
 async function main(): Promise<void> {

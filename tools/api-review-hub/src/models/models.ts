@@ -89,4 +89,5 @@ export interface RepositoryRegistration {
     readonly rotationDate: string;
     readonly status: "active" | "disabled";
     readonly lastUpdated: string;
+    readonly deletedOn?: string;
 }

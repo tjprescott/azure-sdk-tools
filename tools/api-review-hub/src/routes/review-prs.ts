@@ -77,7 +77,7 @@ export async function handleGetOperationStatus(
         operationId,
     });
 
-    const operation = getOperation(operationId);
+    const operation = await getOperation(operationId);
 
     if (!operation) {
         sendError(response, 404, "operationNotFound", "The operation was not found.", "operationId");
@@ -115,7 +115,7 @@ export async function handleAcceptOperationUpdate(
 
     let operation;
     try {
-        operation = acceptOperationUpdate(operationId, body as OperationUpdate);
+        operation = await acceptOperationUpdate(operationId, body as OperationUpdate);
     } catch (error) {
         if (error instanceof OperationUpdateConflictError) {
             sendError(response, 409, "operationUpdateConflict", "The operation update does not match the queued Azure DevOps pipeline run.");
@@ -138,6 +138,10 @@ export async function handleAcceptOperationUpdate(
     }
 
     sendJson(response, 202, operation);
+    if (operation.status === "succeeded" || operation.status === "failed") {
+        return;
+    }
+
     scheduleOperationUpdateProcessing(operationId, body as OperationUpdate);
 }
 
