@@ -61,20 +61,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path '$(Build.ArtifactStagingDirectory)/result' | Out-Null
         displayName: 'Validate request parameters'
 
-      # Always generate the target bundle. Update requests stop at this artifact;
-      # create requests also generate a base bundle below for comparison.
-      - template: ${{ format('/eng/pipelines/templates/steps/create-apireview-hub-artifacts-{0}.yml', parameters.language) }}
-        parameters:
-          requestMode: ${{ parameters.requestMode }}
-          operationId: ${{ parameters.operationId }}
-          packageName: ${{ parameters.packageName }}
-          ref: ${{ parameters.targetRef }}
-          kind: target
-          outputDir: $(Build.ArtifactStagingDirectory)/target
-          workingDir: $(Pipeline.Workspace)/apireview/target
-
-      # Create requests need both sides of the review. The language-specific
-      # template still generates only one bundle for one ref per invocation.
+      # Create requests need the baseline bundle first. The job uses one source
+      # checkout and switches it from the tooling ref to base, then target.
       - ${{ if eq(parameters.requestMode, 'create') }}:
         - template: ${{ format('/eng/pipelines/templates/steps/create-apireview-hub-artifacts-{0}.yml', parameters.language) }}
           parameters:
@@ -85,6 +73,18 @@ jobs:
             kind: base
             outputDir: $(Build.ArtifactStagingDirectory)/base
             workingDir: $(Pipeline.Workspace)/apireview/base
+
+      # Always generate the target bundle. Update requests only generate this
+      # artifact; create requests generate it after the base bundle above.
+      - template: ${{ format('/eng/pipelines/templates/steps/create-apireview-hub-artifacts-{0}.yml', parameters.language) }}
+        parameters:
+          requestMode: ${{ parameters.requestMode }}
+          operationId: ${{ parameters.operationId }}
+          packageName: ${{ parameters.packageName }}
+          ref: ${{ parameters.targetRef }}
+          kind: target
+          outputDir: $(Build.ArtifactStagingDirectory)/target
+          workingDir: $(Pipeline.Workspace)/apireview/target
 
           # The web service reads this summary to decide whether the operation
           # succeeded, whether a create request changed API shape, and which build
