@@ -89,13 +89,13 @@ export async function upsertApprovalRecord(request: UpsertApprovalRecordRequest)
     return record;
 }
 
-export async function findLatestApprovalRecordForApiHash(
+export async function findApprovalRecordsForApiHash(
     language: string,
     packageName: string,
     version: string,
     apiHash: string,
     options: ApprovalRecordQueryOptions = {},
-): Promise<ApprovalRecord | undefined> {
+): Promise<ApprovalRecord[]> {
     const packageVersionKey = getPackageVersionKey(language, packageName, version);
     const container = await getApprovalRecordsContainer();
     const response = await container.items.query<ApprovalRecord>({
@@ -112,7 +112,30 @@ export async function findLatestApprovalRecordForApiHash(
         ],
     }).fetchAll();
 
-    return response.resources[0];
+    return response.resources;
+}
+
+export async function findApprovalRecordsForPackageVersion(
+    language: string,
+    packageName: string,
+    version: string,
+    options: ApprovalRecordQueryOptions = {},
+): Promise<ApprovalRecord[]> {
+    const packageVersionKey = getPackageVersionKey(language, packageName, version);
+    const container = await getApprovalRecordsContainer();
+    const response = await container.items.query<ApprovalRecord>({
+        query: `
+            SELECT * FROM approvalRecords ar
+            WHERE ar.packageVersionKey = @packageVersionKey
+                ${getDeletedRecordFilter("ar", options)}
+            ORDER BY ar.lastUpdatedOn DESC
+        `,
+        parameters: [
+            { name: "@packageVersionKey", value: packageVersionKey },
+        ],
+    }).fetchAll();
+
+    return response.resources;
 }
 
 function getPackageVersionKey(language: string, packageName: string, version: string): string {
@@ -120,10 +143,7 @@ function getPackageVersionKey(language: string, packageName: string, version: st
 }
 
 function getApprovalRecordId(request: UpsertApprovalRecordRequest, packageVersionKey: string): string {
-    const reviewIdentity = request.githubReviewId === undefined
-        ? `${request.reviewPullRequest.githubRepositoryId}:${request.reviewPullRequest.pullRequestNumber}:${request.apiHash}:${request.lastUpdatedBy}`
-        : `${request.reviewPullRequest.githubRepositoryId}:${request.reviewPullRequest.pullRequestNumber}:${request.githubReviewId}`;
-    return createHash("sha256").update(`${packageVersionKey}:${reviewIdentity}`).digest("hex");
+    return createHash("sha256").update(`${packageVersionKey}:${request.apiHash}:${request.lastUpdatedBy}`).digest("hex");
 }
 
 async function readApprovalRecord(

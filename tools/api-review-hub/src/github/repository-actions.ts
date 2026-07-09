@@ -1,5 +1,6 @@
 import { load } from "js-yaml";
 
+import type { ApprovalStatus } from "../models/models.js";
 import { getRepositoryInstallationToken, gitHubFetch, gitHubRequest } from "./github-app.js";
 
 const architectsFilePath = ".github/ARCHITECTS";
@@ -64,6 +65,30 @@ export interface ReviewPullRequestLabelOptions {
     readonly pullRequestNumber: number;
 }
 
+export interface WorkingPullRequestApiApprovalLabelOptions {
+    readonly owner: string;
+    readonly repo: string;
+    readonly workingBranch: string;
+    readonly approvalStatus: ApprovalStatus;
+}
+
+export interface EnforceWorkingPullRequestApiApprovalLabelOptions {
+    readonly owner: string;
+    readonly repo: string;
+    readonly pullRequestNumber: number;
+    readonly changedLabelName: string;
+    readonly action: "labeled" | "unlabeled";
+    readonly approvalStatus: ApprovalStatus;
+    readonly reviewPullRequestUrl: string;
+}
+
+export interface RemoveMisusedApiApprovalLabelOptions {
+    readonly owner: string;
+    readonly repo: string;
+    readonly issueNumber: number;
+    readonly labelName: string;
+}
+
 export interface ReviewPullRequestOutOfDateOptions extends ReviewPullRequestLabelOptions {
     readonly operationId: string;
     readonly pipelineUrl?: string;
@@ -124,11 +149,15 @@ interface GitHubPullRequestResponse {
     readonly number: number;
     readonly title: string;
     readonly html_url: string;
+    readonly state?: string;
     readonly draft: boolean;
     readonly base: {
         readonly repo: {
             readonly id: number;
         };
+    };
+    readonly head?: {
+        readonly ref?: string;
     };
 }
 
@@ -146,6 +175,11 @@ interface GitHubIssueCommentResponse {
     };
 }
 
+interface GitHubLabelResponse {
+    readonly color?: string;
+    readonly description?: string;
+}
+
 interface GitHubContentResponse {
     readonly content?: string;
     readonly encoding?: string;
@@ -159,6 +193,12 @@ interface ArchitectEntry {
 const reviewOutOfDateCommentMarker = "<!-- api-review-hub:review-out-of-date -->";
 const reviewOutOfDateCommentText = "A change has been pushed to the working branch and is being processed.";
 const reviewInSyncCommentText = "The working branch and review PR are currently in sync.";
+const apiApprovedLabelName = "api-approved";
+const apiApprovedLabelColor = "3c9d32";
+const apiApprovedLabelDescription = "API review has been approved.";
+const apiChangesRequestedLabelName = "api-changes-requested";
+const apiChangesRequestedLabelColor = "d93f0b";
+const apiChangesRequestedLabelDescription = "API review changes have been requested.";
 
 export async function publishApiReviewPullRequest(request: PublishApiReviewPullRequestRequest): Promise<PublishedApiReviewPullRequest> {
     const token = await getRepositoryInstallationToken(request.owner, request.repo);
@@ -315,6 +355,62 @@ export async function clearReviewPullRequestOutOfDate(options: ClearReviewPullRe
 
     await removeLabel(repositoryUrl, token, options.pullRequestNumber, "review-out-of-date");
     await updateReviewOutOfDateCommentToInSync(repositoryUrl, token, options.pullRequestNumber, options.operationId);
+}
+
+export async function syncWorkingPullRequestApiApprovalLabel(options: WorkingPullRequestApiApprovalLabelOptions): Promise<GitHubPullRequestReference | undefined> {
+    const token = await getRepositoryInstallationToken(options.owner, options.repo);
+    const repositoryUrl = `https://api.github.com/repos/${options.owner}/${options.repo}`;
+    const workingPullRequest = await findOpenPullRequestForBranch(repositoryUrl, token, options.owner, options.workingBranch);
+    if (!workingPullRequest) {
+        return undefined;
+    }
+
+    await applyApiApprovalLabels(repositoryUrl, token, workingPullRequest.number, options.approvalStatus);
+    return workingPullRequest;
+}
+
+export async function enforceWorkingPullRequestApiApprovalLabel(options: EnforceWorkingPullRequestApiApprovalLabelOptions): Promise<boolean> {
+    const expectedLabelName = getExpectedApiApprovalLabelName(options.approvalStatus);
+    const shouldUndo = options.action === "labeled"
+        ? options.changedLabelName !== expectedLabelName
+        : options.changedLabelName === expectedLabelName;
+    if (!shouldUndo) {
+        return false;
+    }
+
+    const token = await getRepositoryInstallationToken(options.owner, options.repo);
+    const repositoryUrl = `https://api.github.com/repos/${options.owner}/${options.repo}`;
+    await applyApiApprovalLabels(repositoryUrl, token, options.pullRequestNumber, options.approvalStatus);
+    await addIssueComment(
+        repositoryUrl,
+        token,
+        options.pullRequestNumber,
+        `The ${options.changedLabelName} label is managed by APIReviewHub, and controlled by the approval status of API Review PR ${options.reviewPullRequestUrl}`,
+    );
+    return true;
+}
+
+export async function removeMisusedApiApprovalLabel(options: RemoveMisusedApiApprovalLabelOptions): Promise<void> {
+    const token = await getRepositoryInstallationToken(options.owner, options.repo);
+    const repositoryUrl = `https://api.github.com/repos/${options.owner}/${options.repo}`;
+    await removeLabel(repositoryUrl, token, options.issueNumber, options.labelName);
+    await addIssueComment(
+        repositoryUrl,
+        token,
+        options.issueNumber,
+        "The `api-approved` and `api-changes-requested` labels are actively managed by APIReviewHub and not meant to be used for other purposes.",
+    );
+}
+
+export async function getOpenPullRequestHeadBranch(options: ReviewPullRequestLabelOptions): Promise<string | undefined> {
+    const token = await getRepositoryInstallationToken(options.owner, options.repo);
+    const repositoryUrl = `https://api.github.com/repos/${options.owner}/${options.repo}`;
+    const pullRequest = await getPullRequest(repositoryUrl, token, options.pullRequestNumber);
+    return pullRequest?.state === "open" ? pullRequest.head?.ref : undefined;
+}
+
+export function isApiApprovalManagedLabel(labelName: string): boolean {
+    return labelName === apiApprovedLabelName || labelName === apiChangesRequestedLabelName;
 }
 
 export async function deleteGitBranch(options: GitBranchDeleteOptions): Promise<boolean> {
@@ -554,13 +650,55 @@ async function findOpenPullRequestForBranch(
     owner: string,
     branch: string,
 ): Promise<GitHubPullRequestReference | undefined> {
+    const branchName = getRefDisplayName(branch, "heads");
     const searchParameters = new URLSearchParams({
         state: "open",
-        head: `${owner}:${branch}`,
+        head: `${owner}:${branchName}`,
     });
     const pullRequests = await gitHubRequest<GitHubPullRequestResponse[]>(`${repositoryUrl}/pulls?${searchParameters}`, token, "Bearer");
     const pullRequest = pullRequests[0];
     return pullRequest ? { number: pullRequest.number, title: pullRequest.title, htmlUrl: pullRequest.html_url } : undefined;
+}
+
+async function getPullRequest(repositoryUrl: string, token: string, pullRequestNumber: number): Promise<GitHubPullRequestResponse | undefined> {
+    const response = await gitHubFetch(`${repositoryUrl}/pulls/${pullRequestNumber}`, token, "Bearer");
+    if (response.status === 404) {
+        return undefined;
+    }
+
+    if (!response.ok) {
+        throw new Error(`GitHub API request failed with status ${response.status}: ${await response.text()}`);
+    }
+
+    return await response.json() as GitHubPullRequestResponse;
+}
+
+async function applyApiApprovalLabels(repositoryUrl: string, token: string, pullRequestNumber: number, approvalStatus: ApprovalStatus): Promise<void> {
+    if (approvalStatus === "approved") {
+        await removeLabel(repositoryUrl, token, pullRequestNumber, apiChangesRequestedLabelName);
+        await addLabel(repositoryUrl, token, pullRequestNumber, apiApprovedLabelName, apiApprovedLabelColor, apiApprovedLabelDescription);
+        return;
+    }
+
+    if (approvalStatus === "rejected") {
+        await removeLabel(repositoryUrl, token, pullRequestNumber, apiApprovedLabelName);
+        await addLabel(repositoryUrl, token, pullRequestNumber, apiChangesRequestedLabelName, apiChangesRequestedLabelColor, apiChangesRequestedLabelDescription);
+        return;
+    }
+
+    await removeLabel(repositoryUrl, token, pullRequestNumber, apiApprovedLabelName);
+    await removeLabel(repositoryUrl, token, pullRequestNumber, apiChangesRequestedLabelName);
+}
+
+function getExpectedApiApprovalLabelName(approvalStatus: ApprovalStatus): string | undefined {
+    switch (approvalStatus) {
+        case "approved":
+            return apiApprovedLabelName;
+        case "rejected":
+            return apiChangesRequestedLabelName;
+        default:
+            return undefined;
+    }
 }
 
 async function addReviewNeededLabel(repositoryUrl: string, token: string, pullRequestNumber: number): Promise<void> {
@@ -580,6 +718,19 @@ async function addLabel(repositoryUrl: string, token: string, pullRequestNumber:
 async function ensureLabel(repositoryUrl: string, token: string, labelName: string, color: string, description: string): Promise<void> {
     const labelResponse = await gitHubFetch(`${repositoryUrl}/labels/${encodeURIComponent(labelName)}`, token, "Bearer");
     if (labelResponse.ok) {
+        const label = await labelResponse.json() as GitHubLabelResponse;
+        if (label.color?.toLowerCase() === color.toLowerCase() && label.description === description) {
+            return;
+        }
+
+        await gitHubRequest<unknown>(`${repositoryUrl}/labels/${encodeURIComponent(labelName)}`, token, "Bearer", {
+            method: "PATCH",
+            body: JSON.stringify({
+                name: labelName,
+                color,
+                description,
+            }),
+        });
         return;
     }
 
@@ -630,6 +781,13 @@ async function upsertReviewOutOfDateComment(
     }
 
     await gitHubRequest<unknown>(`${repositoryUrl}/issues/${pullRequestNumber}/comments`, token, "Bearer", {
+        method: "POST",
+        body: JSON.stringify({ body }),
+    });
+}
+
+async function addIssueComment(repositoryUrl: string, token: string, issueNumber: number, body: string): Promise<void> {
+    await gitHubRequest<unknown>(`${repositoryUrl}/issues/${issueNumber}/comments`, token, "Bearer", {
         method: "POST",
         body: JSON.stringify({ body }),
     });

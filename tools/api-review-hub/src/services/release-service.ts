@@ -1,5 +1,6 @@
-import type { ApprovalRecord, MarkPackageVersionReleasedRequest, ReleaseGateDecision } from "../models/models.js";
-import { findLatestApprovalRecordForApiHash } from "./approval-record-store.js";
+import type { MarkPackageVersionReleasedRequest, ReleaseGateApprovalRecord, ReleaseGateDecision } from "../models/models.js";
+import type { ApprovalRecord } from "./approval-record-store.js";
+import { findApprovalRecordsForPackageVersion } from "./approval-record-store.js";
 import { markPackageVersionReleased as markStoredPackageVersionReleased } from "./package-store.js";
 
 interface ReleaseGateRequest {
@@ -10,35 +11,41 @@ interface ReleaseGateRequest {
 }
 
 export async function evaluateReleaseGate(request: ReleaseGateRequest): Promise<ReleaseGateDecision> {
+    const approvalRecords = await findApprovalRecordsForPackageVersion(request.language, request.packageName, request.version);
+    const approvals = approvalRecords.map(toReleaseGateApprovalRecord);
+
     if (!request.apiHash) {
         return {
             allowed: false,
             reason: "missingApiHash",
-            approval: createReleaseGateApproval(request, "pending"),
+            details: "Release gate evaluation requires an API hash.",
+            approvals,
         };
     }
 
-    const approval = await findLatestApprovalRecordForApiHash(request.language, request.packageName, request.version, request.apiHash);
-    if (!approval) {
+    const matchingApprovals = approvalRecords.filter((approval) => approval.apiHash === request.apiHash);
+    if (matchingApprovals.some((approval) => approval.status === "rejected")) {
         return {
             allowed: false,
-            reason: "missingApproval",
-            approval: createReleaseGateApproval(request, "pending"),
+            reason: "rejected",
+            details: "At least one architect has requested changes for this API.",
+            approvals,
         };
     }
 
-    if (approval.status === "approved") {
+    if (matchingApprovals.some((approval) => approval.status === "approved")) {
         return {
             allowed: true,
             reason: "approved",
-            approval,
+            approvals,
         };
     }
 
     return {
         allowed: false,
-        reason: approval.status === "rejected" ? "rejected" : "missingApproval",
-        approval,
+        reason: "missingApproval",
+        details: "No current architect approval was found for this API hash.",
+        approvals,
     };
 }
 
@@ -47,13 +54,13 @@ export async function markPackageVersionReleased(request: MarkPackageVersionRele
     return packageVersion !== undefined;
 }
 
-function createReleaseGateApproval(request: ReleaseGateRequest, status: ApprovalRecord["status"]): ApprovalRecord {
+function toReleaseGateApprovalRecord(record: ApprovalRecord): ReleaseGateApprovalRecord {
     return {
-        packageName: request.packageName,
-        version: request.version,
-        apiHash: request.apiHash,
-        status,
-        lastUpdatedBy: "api-review-hub",
-        lastUpdatedOn: new Date().toISOString(),
+        apiHash: record.apiHash,
+        ...(record.commitSha ? { commitSha: record.commitSha } : {}),
+        status: record.status,
+        pullRequestUrl: record.pullRequestUrl,
+        lastUpdatedBy: record.lastUpdatedBy,
+        lastUpdatedOn: record.lastUpdatedOn,
     };
 }

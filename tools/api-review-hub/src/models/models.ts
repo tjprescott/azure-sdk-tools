@@ -58,10 +58,20 @@ export interface OperationUpdate {
 export interface ReleaseGateDecision {
     readonly allowed: boolean;
     readonly reason: "approved" | "missingApproval" | "rejected" | "unknownPackage" | "staleArtifact" | "missingApiHash";
-    readonly approval: ApprovalRecord;
+    readonly details?: string;
+    readonly approvals: ReleaseGateApprovalRecord[];
 }
 
 export type ApprovalStatus = "approved" | "rejected" | "revoked" | "pending";
+
+export interface ReleaseGateApprovalRecord {
+    readonly apiHash: string;
+    readonly commitSha?: string;
+    readonly status: ApprovalStatus;
+    readonly pullRequestUrl: string;
+    readonly lastUpdatedBy: string;
+    readonly lastUpdatedOn: string;
+}
 
 export interface ApprovalRecord {
     readonly packageName: string;

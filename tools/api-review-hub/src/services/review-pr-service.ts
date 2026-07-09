@@ -206,7 +206,7 @@ export async function acceptReviewPullRequestUpdate(
 }
 
 export async function getOperation(operationId: string): Promise<OperationStatus | undefined> {
-    const record = await getAdoOperation(operationId);
+    const record = await getAdoOperation(operationId, { includeDeleted: true });
     if (!record) {
         return undefined;
     }
@@ -215,7 +215,7 @@ export async function getOperation(operationId: string): Promise<OperationStatus
 }
 
 export async function acceptOperationUpdate(operationId: string, update: OperationUpdate): Promise<OperationStatus | undefined> {
-    const operation = await getAdoOperation(operationId);
+    const operation = await getAdoOperation(operationId, { includeDeleted: true });
     if (!operation) {
         return undefined;
     }

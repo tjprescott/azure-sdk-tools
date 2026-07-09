@@ -6,7 +6,7 @@ import { DefaultAzureCredential } from "@azure/identity";
 import { SecretClient, type KeyVaultSecret } from "@azure/keyvault-secrets";
 
 import { getRequiredSetting } from "../config/settings.js";
-import { deleteGitBranch, getApiHashForPackageAtCommit, isArchitectReviewerForPackage, markReviewPullRequestOutOfDate } from "../github/repository-actions.js";
+import { deleteGitBranch, enforceWorkingPullRequestApiApprovalLabel, getApiHashForPackageAtCommit, getOpenPullRequestHeadBranch, isApiApprovalManagedLabel, isArchitectReviewerForPackage, markReviewPullRequestOutOfDate, removeMisusedApiApprovalLabel, syncWorkingPullRequestApiApprovalLabel } from "../github/repository-actions.js";
 import type { RepositoryRegistration } from "../models/models.js";
 import { upsertApprovalRecord } from "../services/approval-record-store.js";
 import {
@@ -20,6 +20,7 @@ import {
     type ReviewPullRequestStatus,
 } from "../services/review-pr-store.js";
 import { acceptReviewPullRequestUpdate } from "../services/review-pr-service.js";
+import { evaluateReleaseGate } from "../services/release-service.js";
 import { tryCreateWebhookEventRecord, updateWebhookEventRecord } from "../services/webhook-event-store.js";
 import { getRequiredHeader, logRequest, readRequestBody, sendEmpty, sendError } from "./http.js";
 
@@ -51,6 +52,9 @@ interface GitHubWebhookPayload {
     };
     readonly issue?: {
         readonly number?: number;
+    };
+    readonly label?: {
+        readonly name?: string;
     };
     readonly comment?: {
         readonly id?: number;
@@ -91,6 +95,18 @@ interface GitHubSignatureValidationResult {
     readonly valid: boolean;
     readonly result?: "invalidSignature" | "invalidSignatureFormat" | "unusableWebhookSecret";
     readonly failureReason?: string;
+}
+
+type ManagedApiApprovalLabelAction = "labeled" | "unlabeled";
+
+interface ManagedApiApprovalLabelWebhookOptions {
+    readonly eventType: "issues" | "pull_request";
+    readonly deliveryId: string;
+    readonly githubRepositoryId: number;
+    readonly payload: GitHubWebhookPayload;
+    readonly pullRequestNumber: number;
+    readonly labelName: string;
+    readonly action: ManagedApiApprovalLabelAction;
 }
 
 const credential = new DefaultAzureCredential();
@@ -268,6 +284,7 @@ export async function handleGitHubWebhookEvent(request: IncomingMessage, respons
         reviewState: decodedPayload.review?.state,
         reviewAuthor: decodedPayload.review?.user?.login,
         issueNumber: decodedPayload.issue?.number,
+        labelName: decodedPayload.label?.name,
         commentId: decodedPayload.comment?.id,
         commentUrl: decodedPayload.comment?.html_url,
         commentAuthor: decodedPayload.comment?.user?.login,
@@ -347,6 +364,9 @@ async function processGitHubWebhookEvent(
         case "pull_request_review":
             await handlePullRequestReviewWebhookEvent(deliveryId, githubRepositoryId, payload);
             return;
+        case "issues":
+            await handleIssuesWebhookEvent(deliveryId, githubRepositoryId, payload);
+            return;
         default:
             logRequest("POST /api/github/webhook-events ignored", {
                 reason: "unsupportedEventType",
@@ -355,6 +375,134 @@ async function processGitHubWebhookEvent(
                 githubRepositoryId,
             });
     }
+}
+
+async function handleIssuesWebhookEvent(deliveryId: string, githubRepositoryId: number, payload: GitHubWebhookPayload): Promise<void> {
+    const issueNumber = payload.issue?.number;
+    const labelName = payload.label?.name;
+    if ((payload.action !== "labeled" && payload.action !== "unlabeled") || !issueNumber || !labelName || !isApiApprovalManagedLabel(labelName)) {
+        logRequest("POST /api/github/webhook-events ignored", {
+            reason: "unsupportedIssuesEvent",
+            eventType: "issues",
+            deliveryId,
+            githubRepositoryId,
+            action: payload.action,
+            issueNumber,
+            labelName,
+        });
+        return;
+    }
+
+    await handleManagedApiApprovalLabelWebhookEvent({
+        eventType: "issues",
+        deliveryId,
+        githubRepositoryId,
+        payload,
+        pullRequestNumber: issueNumber,
+        labelName,
+        action: payload.action,
+    });
+}
+
+async function handleManagedApiApprovalLabelWebhookEvent(options: ManagedApiApprovalLabelWebhookOptions): Promise<void> {
+    const repository = options.payload.repository?.full_name ? parseRepositoryFullName(options.payload.repository.full_name) : undefined;
+    if (!repository) {
+        console.warn(JSON.stringify({
+            event: "managedApiApprovalLabelWebhookIgnoredForInvalidRepositoryFullName",
+            eventType: options.eventType,
+            deliveryId: options.deliveryId,
+            githubRepositoryId: options.githubRepositoryId,
+            repositoryFullName: options.payload.repository?.full_name,
+            pullRequestNumber: options.pullRequestNumber,
+            labelName: options.labelName,
+        }));
+        return;
+    }
+
+    const workingBranch = await getOpenPullRequestHeadBranch({
+        owner: repository.owner,
+        repo: repository.repo,
+        pullRequestNumber: options.pullRequestNumber,
+    });
+    if (!workingBranch) {
+        if (options.action === "labeled") {
+            await removeMisusedApiApprovalLabel({
+                owner: repository.owner,
+                repo: repository.repo,
+                issueNumber: options.pullRequestNumber,
+                labelName: options.labelName,
+            });
+        }
+
+        console.log(JSON.stringify({
+            event: options.action === "labeled" ? "misusedApiApprovalLabelRemoved" : "managedApiApprovalLabelWebhookIgnoredForNonOpenPullRequest",
+            eventType: options.eventType,
+            deliveryId: options.deliveryId,
+            githubRepositoryId: options.githubRepositoryId,
+            pullRequestNumber: options.pullRequestNumber,
+            labelName: options.labelName,
+            action: options.action,
+        }));
+        return;
+    }
+
+    const reviewPullRequest = (await findOpenReviewPullRequestsByWorkingBranch(options.githubRepositoryId, workingBranch))
+        .sort((left, right) => right.lastUpdatedOn.localeCompare(left.lastUpdatedOn))[0];
+    if (!reviewPullRequest) {
+        if (options.action === "labeled") {
+            await removeMisusedApiApprovalLabel({
+                owner: repository.owner,
+                repo: repository.repo,
+                issueNumber: options.pullRequestNumber,
+                labelName: options.labelName,
+            });
+        }
+
+        console.log(JSON.stringify({
+            event: options.action === "labeled" ? "misusedApiApprovalLabelRemoved" : "managedApiApprovalLabelWebhookIgnoredForNonApiReviewWorkingPullRequest",
+            eventType: options.eventType,
+            deliveryId: options.deliveryId,
+            githubRepositoryId: options.githubRepositoryId,
+            pullRequestNumber: options.pullRequestNumber,
+            labelName: options.labelName,
+            action: options.action,
+            workingBranch,
+        }));
+        return;
+    }
+
+    const releaseGateDecision = await evaluateReleaseGate({
+        language: reviewPullRequest.language,
+        packageName: reviewPullRequest.packageName,
+        version: reviewPullRequest.targetVersion,
+        apiHash: reviewPullRequest.approval.apiHash,
+    });
+
+    const reverted = await enforceWorkingPullRequestApiApprovalLabel({
+        owner: repository.owner,
+        repo: repository.repo,
+        pullRequestNumber: options.pullRequestNumber,
+        changedLabelName: options.labelName,
+        action: options.action,
+        approvalStatus: getApprovalLabelStatus(releaseGateDecision.reason),
+        reviewPullRequestUrl: reviewPullRequest.pullRequestUrl,
+    });
+
+    console.log(JSON.stringify({
+        event: reverted ? "managedApiApprovalLabelChangeReverted" : "managedApiApprovalLabelChangeAllowed",
+        eventType: options.eventType,
+        deliveryId: options.deliveryId,
+        githubRepositoryId: options.githubRepositoryId,
+        pullRequestNumber: options.pullRequestNumber,
+        labelName: options.labelName,
+        action: options.action,
+        workingBranch,
+        reviewPullRequestNumber: reviewPullRequest.pullRequestNumber,
+        reviewPullRequestUrl: reviewPullRequest.pullRequestUrl,
+        approvalStatus: reviewPullRequest.approval.status,
+        releaseGateReason: releaseGateDecision.reason,
+        releaseGateAllowed: releaseGateDecision.allowed,
+    }));
 }
 
 async function handlePushWebhookEvent(deliveryId: string, githubRepositoryId: number, payload: GitHubWebhookPayload): Promise<void> {
@@ -474,6 +622,22 @@ async function handlePullRequestReviewWebhookEvent(deliveryId: string, githubRep
         return;
     }
 
+    if (approvalStatus === "revoked") {
+        console.log(JSON.stringify({
+            event: "pullRequestReviewDismissalWebhookFields",
+            deliveryId,
+            githubRepositoryId,
+            action: payload.action,
+            pullRequestNumber,
+            reviewId: payload.review?.id,
+            reviewState: payload.review?.state,
+            reviewCommitSha,
+            reviewUserLogin: payload.review?.user?.login,
+            senderLogin: payload.sender?.login,
+            reviewer,
+        }));
+    }
+
     const reviewPullRequest = await getReviewPullRequestRecord(githubRepositoryId, pullRequestNumber);
     if (!reviewPullRequest) {
         console.log(JSON.stringify({
@@ -544,6 +708,22 @@ async function handlePullRequestReviewWebhookEvent(deliveryId: string, githubRep
             lastUpdatedBy: reviewer,
         })
         : undefined;
+    const releaseGateDecision = updatedRecord
+        ? await evaluateReleaseGate({
+            language: updatedRecord.language,
+            packageName: updatedRecord.packageName,
+            version: updatedRecord.targetVersion,
+            apiHash,
+        })
+        : undefined;
+    const workingPullRequest = updatedRecord
+        ? await syncWorkingPullRequestApiApprovalLabel({
+            owner: repository.owner,
+            repo: repository.repo,
+            workingBranch: updatedRecord.workingBranch,
+            approvalStatus: getApprovalLabelStatus(releaseGateDecision?.reason),
+        })
+        : undefined;
     console.log(JSON.stringify({
         event: updatedRecord ? "reviewPullRequestApprovalWebhookApplied" : "pullRequestReviewWebhookIgnoredForMissingReviewPullRequest",
         deliveryId,
@@ -555,9 +735,23 @@ async function handlePullRequestReviewWebhookEvent(deliveryId: string, githubRep
         reviewCommitSha,
         reviewer,
         approvalStatus,
+        releaseGateReason: releaseGateDecision?.reason,
+        releaseGateAllowed: releaseGateDecision?.allowed,
         apiHash,
         approvalRecordId: approvalRecord?.id,
+        workingPullRequestNumber: workingPullRequest?.number,
     }));
+}
+
+function getApprovalLabelStatus(releaseGateReason: "approved" | "missingApproval" | "rejected" | "unknownPackage" | "staleArtifact" | "missingApiHash" | undefined): ApprovalStatus {
+    switch (releaseGateReason) {
+        case "approved":
+            return "approved";
+        case "rejected":
+            return "rejected";
+        default:
+            return "revoked";
+    }
 }
 
 async function handlePullRequestWebhookEvent(deliveryId: string, githubRepositoryId: number, payload: GitHubWebhookPayload): Promise<void> {
@@ -569,6 +763,20 @@ async function handlePullRequestWebhookEvent(deliveryId: string, githubRepositor
             githubRepositoryId,
             action: payload.action,
             pullRequestNumber: payload.pull_request?.number,
+        });
+        return;
+    }
+
+    const labelName = payload.label?.name;
+    if ((payload.action === "labeled" || payload.action === "unlabeled") && labelName && isApiApprovalManagedLabel(labelName)) {
+        await handleManagedApiApprovalLabelWebhookEvent({
+            eventType: "pull_request",
+            deliveryId,
+            githubRepositoryId,
+            payload,
+            pullRequestNumber: payload.pull_request.number,
+            labelName,
+            action: payload.action,
         });
         return;
     }

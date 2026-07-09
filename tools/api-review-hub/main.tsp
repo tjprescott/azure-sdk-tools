@@ -104,6 +104,27 @@ namespace ApiReviewHub {
       lastUpdatedOn?: offsetDateTime;
     }
 
+    /** Curated approval evidence returned by the release gate. */
+    model ReleaseGateApprovalRecord {
+      /** The API hash associated with this approval decision. */
+      apiHash: string;
+
+      /** Git commit SHA on the review branch that this approval decision applies to. */
+      commitSha?: string;
+
+      /** Approval outcome. */
+      status: ApprovalStatus;
+
+      /** Review pull request where this approval decision was recorded. */
+      pullRequestUrl: string;
+
+      /** The GitHub identity that granted, changed, or revoked the approval. */
+      lastUpdatedBy: string;
+
+      /** Time the approval state changed. */
+      lastUpdatedOn: offsetDateTime;
+    }
+
     /** GitHub pull request associated with API review for a package version. */
     model ReviewPullRequest {
       /** Package version associated with this review pull request. */
@@ -274,8 +295,11 @@ namespace ApiReviewHub {
       /** Machine-readable decision reason. */
       reason: "approved" | "missingApproval" | "rejected" | "unknownPackage" | "staleArtifact" | "missingApiHash";
 
-      /** Most recent approval record. */
-      approval: ApprovalRecord;
+      /** Human-readable context for non-approved decisions. */
+      details?: string;
+
+      /** Approval records considered for this decision, sorted with the most recent record first. */
+      approvals: ReleaseGateApprovalRecord[];
     }
 
     /** Request to mark a package version as released. */
