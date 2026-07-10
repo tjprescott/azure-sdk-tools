@@ -6,12 +6,9 @@ import { loadVariables } from "./variables.js";
 
 const credential = new DefaultAzureCredential();
 const repositoryRegistrationsContainerName = "repositoryRegistrations";
-const initialRepositoryRegistration: Omit<RepositoryRegistration, "lastUpdated" | "rotationDate"> = {
+const initialRepositoryRegistration: Omit<RepositoryRegistration, "lastUpdated"> = {
     repositoryFullName: "tjprescott/azure-sdk-for-python",
     githubRepositoryId: 1281659283,
-    githubWebhookId: 646775069,
-    webhookSecretKey: "github-webhook-1281659283",
-    lastWebhookSecretKey: "github-webhook-1281659283-prev",
     status: "active",
 };
 
@@ -25,19 +22,16 @@ async function main(): Promise<void> {
 
     console.log(
         `Bootstrapped repository registration for ${registration.repositoryFullName} ` +
-            `(repositoryId=${registration.githubRepositoryId}, webhookId=${registration.githubWebhookId})`,
+            `(repositoryId=${registration.githubRepositoryId})`,
     );
 }
 
 function buildRepositoryRegistration(): RepositoryRegistration & { readonly id: string } {
     const now = new Date();
-    const rotationDate = new Date(now);
-    rotationDate.setUTCFullYear(rotationDate.getUTCFullYear() + 1);
 
     return {
         id: String(initialRepositoryRegistration.githubRepositoryId),
         ...initialRepositoryRegistration,
-        rotationDate: rotationDate.toISOString(),
         lastUpdated: now.toISOString(),
     };
 }

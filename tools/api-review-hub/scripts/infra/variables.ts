@@ -34,8 +34,7 @@ export interface Variables {
     readonly githubAppId: string;
     readonly githubAppKeyVaultUrl: string;
     readonly githubAppKeyName: string;
-    readonly githubInstallOwner: string;
-    readonly allowedRepositoryOwners: string;
+    readonly githubWebhookSecretKey: string;
     readonly entraAppId: string;
     readonly entraAppIdUrl: string;
     readonly assigneeObjectId?: string;
@@ -124,8 +123,7 @@ export async function loadVariables(path = process.env.VARIABLES_PATH ?? default
     const githubAppId = getOptionalValue(variables, "GITHUB_APP_ID");
     const githubAppKeyVaultUrl = getOptionalValue(variables, "GITHUB_APP_KEYVAULT_URL");
     const githubAppKeyName = getOptionalValue(variables, "GITHUB_APP_KEY_NAME");
-    const githubInstallOwner = getOptionalValue(variables, "GITHUB_INSTALL_OWNER");
-    const allowedRepositoryOwners = getOptionalValue(variables, "ALLOWED_REPOSITORY_OWNERS");
+    const githubWebhookSecretKey = getOptionalValue(variables, "GITHUB_WEBHOOK_SECRET_KEY");
     const entraAppId = getOptionalValue(variables, "ENTRA_APP_ID");
     const entraAppIdUrl = getOptionalValue(variables, "ENTRA_APP_ID_URL");
     const assigneeObjectId = getOptionalValue(process.env, "ASSIGNEE_OBJECT_ID") || undefined;
@@ -148,8 +146,7 @@ export async function loadVariables(path = process.env.VARIABLES_PATH ?? default
         { key: "github_app_id", value: githubAppId },
         { key: "github_app_keyvault_url", value: githubAppKeyVaultUrl },
         { key: "github_app_key_name", value: githubAppKeyName },
-        { key: "github_install_owner", value: githubInstallOwner },
-        { key: "allowed_repository_owners", value: allowedRepositoryOwners },
+        { key: "github_webhook_secret_key", value: githubWebhookSecretKey },
         ...retentionSettings,
     ];
 
@@ -170,8 +167,7 @@ export async function loadVariables(path = process.env.VARIABLES_PATH ?? default
         githubAppId,
         githubAppKeyVaultUrl,
         githubAppKeyName,
-        githubInstallOwner,
-        allowedRepositoryOwners,
+        githubWebhookSecretKey,
         entraAppId,
         entraAppIdUrl,
         assigneeObjectId,

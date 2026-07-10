@@ -6,23 +6,25 @@ import { loadVariables } from "./variables.js";
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const packageDirectory = resolve(scriptDirectory, "../..");
-const cryptoUserRoleName = "Key Vault Crypto User";
 
 async function main(): Promise<void> {
     const variables = await loadVariables();
-    const githubAppKeyVaultName = getKeyVaultName(variables.githubAppKeyVaultUrl);
-    const principalId = await getWebAppPrincipalId(variables.resourceGroupName, variables.webAppName, variables.subscriptionId);
-    const isRbacEnabled = await isKeyVaultRbacEnabled(githubAppKeyVaultName, variables.subscriptionId);
+    const webAppPrincipalId = await getWebAppPrincipalId(variables.resourceGroupName, variables.webAppName, variables.subscriptionId);
+    const appConfigurationId = await getAppConfigurationId(variables.resourceGroupName, variables.appConfigurationName, variables.subscriptionId);
+    const keyVaultId = await getKeyVaultId(variables.keyVaultName, variables.subscriptionId);
+    const githubAppKeyScope = `${keyVaultId}/keys/${variables.githubAppKeyName}`;
 
-    if (isRbacEnabled) {
-        const keyId = await getKeyId(githubAppKeyVaultName, variables.githubAppKeyName, variables.subscriptionId);
-        await grantRbacKeyAccess(principalId, keyId);
-        console.log(`Granted ${cryptoUserRoleName} to ${variables.webAppName} on ${keyId}`);
-        return;
+    await grantAzureRole(webAppPrincipalId, "ServicePrincipal", "App Configuration Data Reader", appConfigurationId);
+    await grantAzureRole(webAppPrincipalId, "ServicePrincipal", "Key Vault Secrets Officer", keyVaultId);
+    await grantAzureRole(webAppPrincipalId, "ServicePrincipal", "Key Vault Crypto User", githubAppKeyScope);
+
+    if (variables.assigneeObjectId) {
+        await grantAzureRole(variables.assigneeObjectId, "User", "App Configuration Data Owner", appConfigurationId);
+        await grantAzureRole(variables.assigneeObjectId, "User", "Key Vault Secrets Officer", keyVaultId);
+        await grantAzureRole(variables.assigneeObjectId, "User", "Key Vault Crypto Officer", keyVaultId);
     }
 
-    await grantAccessPolicyKeyAccess(githubAppKeyVaultName, principalId, variables.subscriptionId);
-    console.log(`Granted key get/sign access policy to ${variables.webAppName} on ${githubAppKeyVaultName}`);
+    console.log("Granted API Review Hub Azure RBAC resource access.");
 }
 
 async function getWebAppPrincipalId(resourceGroupName: string, webAppName: string, subscriptionId: string): Promise<string> {
@@ -49,31 +51,14 @@ async function getWebAppPrincipalId(resourceGroupName: string, webAppName: strin
     return principalId;
 }
 
-async function isKeyVaultRbacEnabled(keyVaultName: string, subscriptionId: string): Promise<boolean> {
-    const value = await runAz([
-        "keyvault",
-        "show",
-        "--name",
-        keyVaultName,
-        "--subscription",
-        subscriptionId,
-        "--query",
-        "properties.enableRbacAuthorization",
-        "-o",
-        "tsv",
-    ]);
-    return value.toLowerCase() === "true";
-}
-
-async function getKeyId(keyVaultName: string, keyName: string, subscriptionId: string): Promise<string> {
+async function getAppConfigurationId(resourceGroupName: string, appConfigurationName: string, subscriptionId: string): Promise<string> {
     return runAz([
-        "keyvault",
-        "key",
+        "appconfig",
         "show",
-        "--vault-name",
-        keyVaultName,
+        "--resource-group",
+        resourceGroupName,
         "--name",
-        keyName,
+        appConfigurationName,
         "--subscription",
         subscriptionId,
         "--query",
@@ -83,7 +68,22 @@ async function getKeyId(keyVaultName: string, keyName: string, subscriptionId: s
     ]);
 }
 
-async function grantRbacKeyAccess(principalId: string, keyId: string): Promise<void> {
+async function getKeyVaultId(keyVaultName: string, subscriptionId: string): Promise<string> {
+    return runAz([
+        "keyvault",
+        "show",
+        "--name",
+        keyVaultName,
+        "--subscription",
+        subscriptionId,
+        "--query",
+        "id",
+        "-o",
+        "tsv",
+    ]);
+}
+
+async function grantAzureRole(principalId: string, principalType: "ServicePrincipal" | "User", roleName: string, scope: string): Promise<void> {
     await runAz([
         "role",
         "assignment",
@@ -91,38 +91,12 @@ async function grantRbacKeyAccess(principalId: string, keyId: string): Promise<v
         "--assignee-object-id",
         principalId,
         "--assignee-principal-type",
-        "ServicePrincipal",
+        principalType,
         "--role",
-        cryptoUserRoleName,
+        roleName,
         "--scope",
-        keyId,
+        scope,
     ], true);
-}
-
-async function grantAccessPolicyKeyAccess(keyVaultName: string, principalId: string, subscriptionId: string): Promise<void> {
-    await runAz([
-        "keyvault",
-        "set-policy",
-        "--name",
-        keyVaultName,
-        "--object-id",
-        principalId,
-        "--key-permissions",
-        "get",
-        "sign",
-        "--subscription",
-        subscriptionId,
-    ]);
-}
-
-function getKeyVaultName(keyVaultUrl: string): string {
-    const hostName = new URL(keyVaultUrl).hostname;
-    const [keyVaultName] = hostName.split(".", 1);
-    if (!keyVaultName) {
-        throw new Error(`Unable to parse Key Vault name from URL: ${keyVaultUrl}`);
-    }
-
-    return keyVaultName;
 }
 
 async function runAz(args: readonly string[], ignoreExistingRoleAssignment = false): Promise<string> {
@@ -174,6 +148,6 @@ function quoteWindowsShellArgument(argument: string): string {
 
 main().catch((error: unknown) => {
     const message = error instanceof Error ? error.message : String(error);
-    console.error(`Failed to grant GitHub App key access: ${message}`);
+    console.error(`Failed to grant API Review Hub resource access: ${message}`);
     process.exitCode = 1;
 });

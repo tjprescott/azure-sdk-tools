@@ -11,13 +11,6 @@ type ArmTemplate = Record<string, unknown>;
 
 const credential = new DefaultAzureCredential();
 
-const roleDefinitionIds = {
-    appConfigurationDataOwner: "5ae67dd6-50cb-40e7-96ff-dc2bfa4b606b",
-    appConfigurationDataReader: "516239f1-63e1-4d78-a4de-a74fb236a071",
-    keyVaultSecretsOfficer: "b86a8fe4-44ce-4948-aee5-eccb2c155cd7",
-    keyVaultSecretsUser: "4633458b-17de-408a-b874-0445c86b69e6",
-} as const;
-
 async function main(): Promise<void> {
     const variables = await loadVariables();
     const resourceClient = new ResourceManagementClient(credential, variables.subscriptionId);
@@ -107,11 +100,7 @@ function buildTemplate(variables: Variables): ArmTemplate {
         webAppResource(),
         productionSlotResource(),
         cosmosDataContributorAssignmentForWebApp(),
-        appConfigurationDataReaderAssignmentForWebApp(),
-        keyVaultSecretsUserAssignmentForWebApp(),
         cosmosDataContributorAssignmentForAssignee(),
-        appConfigurationDataOwnerAssignmentForAssignee(),
-        keyVaultSecretsOfficerAssignmentForAssignee(),
     ];
 
     return {
@@ -408,82 +397,6 @@ function cosmosSqlRoleAssignmentResource(options: {
     });
 }
 
-function appConfigurationDataReaderAssignmentForWebApp(): ArmResource {
-    return azureRoleAssignmentResource({
-        nameSeed: "webapp-appconfig-data-reader",
-        principalId: "[reference(variables('webAppResourceId'), '2023-12-01', 'Full').identity.principalId]",
-        principalNameSeed: "[variables('webAppResourceId')]",
-        principalType: "ServicePrincipal",
-        roleDefinitionId: roleDefinitionIds.appConfigurationDataReader,
-        scope: "[format('Microsoft.AppConfiguration/configurationStores/{0}', parameters('appConfigurationName'))]",
-        dependsOn: ["[variables('appConfigurationResourceId')]", "[variables('webAppResourceId')]"],
-    });
-}
-
-function appConfigurationDataOwnerAssignmentForAssignee(): ArmResource {
-    return azureRoleAssignmentResource({
-        nameSeed: "assignee-appconfig-data-owner",
-        principalId: "[parameters('assigneeObjectId')]",
-        principalType: "User",
-        roleDefinitionId: roleDefinitionIds.appConfigurationDataOwner,
-        scope: "[format('Microsoft.AppConfiguration/configurationStores/{0}', parameters('appConfigurationName'))]",
-        condition: "[not(empty(parameters('assigneeObjectId')))]",
-        dependsOn: ["[variables('appConfigurationResourceId')]"],
-    });
-}
-
-function keyVaultSecretsUserAssignmentForWebApp(): ArmResource {
-    return azureRoleAssignmentResource({
-        nameSeed: "webapp-keyvault-secrets-user",
-        principalId: "[reference(variables('webAppResourceId'), '2023-12-01', 'Full').identity.principalId]",
-        principalNameSeed: "[variables('webAppResourceId')]",
-        principalType: "ServicePrincipal",
-        roleDefinitionId: roleDefinitionIds.keyVaultSecretsUser,
-        scope: "[format('Microsoft.KeyVault/vaults/{0}', parameters('keyVaultName'))]",
-        dependsOn: ["[variables('keyVaultResourceId')]", "[variables('webAppResourceId')]"],
-    });
-}
-
-function keyVaultSecretsOfficerAssignmentForAssignee(): ArmResource {
-    return azureRoleAssignmentResource({
-        nameSeed: "assignee-keyvault-secrets-officer",
-        principalId: "[parameters('assigneeObjectId')]",
-        principalType: "User",
-        roleDefinitionId: roleDefinitionIds.keyVaultSecretsOfficer,
-        scope: "[format('Microsoft.KeyVault/vaults/{0}', parameters('keyVaultName'))]",
-        condition: "[not(empty(parameters('assigneeObjectId')))]",
-        dependsOn: ["[variables('keyVaultResourceId')]"],
-    });
-}
-
-function azureRoleAssignmentResource(options: {
-    readonly nameSeed: string;
-    readonly principalId: ArmExpression;
-    readonly principalNameSeed?: ArmExpression;
-    readonly principalType: "ServicePrincipal" | "User";
-    readonly roleDefinitionId: string;
-    readonly scope: ArmExpression;
-    readonly dependsOn: readonly ArmExpression[];
-    readonly condition?: ArmExpression;
-}): ArmResource {
-    const principalNameSeedExpression = armExpressionArgument(options.principalNameSeed ?? options.principalId);
-    const scopeExpression = armExpressionArgument(options.scope);
-
-    return removeUndefinedProperties({
-        type: "Microsoft.Authorization/roleAssignments",
-        apiVersion: "2022-04-01",
-        name: `[guid(${scopeExpression}, ${principalNameSeedExpression}, '${options.nameSeed}')]`,
-        scope: options.scope,
-        condition: options.condition,
-        dependsOn: options.dependsOn,
-        properties: {
-            principalId: options.principalId,
-            principalType: options.principalType,
-            roleDefinitionId: `[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '${options.roleDefinitionId}')]`,
-        },
-    });
-}
-
 function armExpressionArgument(expression: ArmExpression): string {
     return expression.startsWith("[") && expression.endsWith("]") ? expression.slice(1, -1) : expression;
 }
@@ -499,12 +412,6 @@ function isNotFound(error: unknown): boolean {
 main().catch((error: unknown) => {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`Failed to create API Review Hub resources: ${message}`);
-
-    if (message.includes("Microsoft.Authorization/roleAssignments/write")) {
-        console.error(
-            "The deployment creates Azure RBAC role assignments. Re-run with an identity that has Owner or User Access Administrator at the target subscription or resource group scope.",
-        );
-    }
 
     process.exitCode = 1;
 });

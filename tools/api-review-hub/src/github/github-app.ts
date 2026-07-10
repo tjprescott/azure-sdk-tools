@@ -117,10 +117,20 @@ export async function gitHubRequest<T>(
     const response = await gitHubFetch(url, token, authorizationScheme, options);
 
     if (!response.ok) {
-        throw new Error(`GitHub API request failed with status ${response.status}: ${await response.text()}`);
+        throw new Error(`GitHub API request failed with status ${response.status}: ${await buildGitHubErrorMessage(response)}`);
     }
 
     return response.json() as Promise<T>;
+}
+
+async function buildGitHubErrorMessage(response: Response): Promise<string> {
+    const parts = [await response.text()];
+    const acceptedPermissions = response.headers.get("x-accepted-github-permissions");
+    if (acceptedPermissions) {
+        parts.push(`accepted permissions: ${acceptedPermissions}`);
+    }
+
+    return parts.join("; ");
 }
 
 export async function gitHubFetch(

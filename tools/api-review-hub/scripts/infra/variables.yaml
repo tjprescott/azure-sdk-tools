@@ -20,8 +20,7 @@ ENTRA_APP_ID: "5fb7298a-3c43-4510-ae9b-d33306f4cd6c"
 ENTRA_APP_ID_URL: "api://apireviewhub-staging"
 
 # Non-secret settings copied into App Configuration.
-GITHUB_APP_ID: 1086291
-GITHUB_APP_KEYVAULT_URL: "https://azuresdkengkeyvault.vault.azure.net/"
-GITHUB_APP_KEY_NAME: "azure-sdk-automation"
-GITHUB_INSTALL_OWNER: tjprescott
-ALLOWED_REPOSITORY_OWNERS: tjprescott
+GITHUB_APP_ID: 4266443
+GITHUB_APP_KEYVAULT_URL: "https://api-reviewhub-kv-staging.vault.azure.net/"
+GITHUB_APP_KEY_NAME: "api-review-hub"
+GITHUB_WEBHOOK_SECRET_KEY: "webhook-secret"

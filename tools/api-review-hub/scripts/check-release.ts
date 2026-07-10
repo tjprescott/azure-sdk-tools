@@ -7,7 +7,7 @@ const releaseGateRequest = {
     packageName: "azure-keyvault-keys",
     version: "4.12.0b3",
     //apiHash: "aef97d024f2a340bd992eff0001471606f8270c8d35a69635de9fb50152b9e01",
-    //apiHash: "cf0288fa35a9a33129dc573defeb1c42c085dc3f57e0dc1962b48553a8f9983e",
+    apiHash: "cf0288fa35a9a33129dc573defeb1c42c085dc3f57e0dc1962b48553a8f9983e",
 };
 
 async function main(): Promise<void> {

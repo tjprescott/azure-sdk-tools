@@ -27,10 +27,25 @@ async function getSetting(key: string): Promise<string | undefined> {
     }
 
     appConfigurationClient ??= new AppConfigurationClient(endpoint, credential);
-    const setting = await appConfigurationClient.getConfigurationSetting({ key });
-    return setting.value;
+    try {
+        const setting = await appConfigurationClient.getConfigurationSetting({ key });
+        return setting.value;
+    } catch (error) {
+        if (isAppConfigurationSettingNotFound(error)) {
+            return undefined;
+        }
+
+        throw error;
+    }
 }
 
 function toEnvironmentVariableName(key: string): string {
     return key.toUpperCase().replace(/[^A-Z0-9]/g, "_");
+}
+
+function isAppConfigurationSettingNotFound(error: unknown): boolean {
+    return typeof error === "object"
+        && error !== null
+        && "statusCode" in error
+        && (error as { statusCode?: unknown }).statusCode === 404;
 }

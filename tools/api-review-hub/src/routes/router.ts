@@ -1,12 +1,12 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
-import { requireAzureIdentity } from "./auth.js";
+import { requireAzureIdentity, type AuthResult } from "./auth.js";
 import { handleGitHubWebhookEvent } from "./github.js";
 import { handleAcceptOperationUpdate, handleGetOperationStatus, handleRequestReviewPullRequestCreation } from "./review-prs.js";
 import { handleEvaluateReleaseGate, handleMarkPackageVersionReleased } from "./releases.js";
 import { sendError } from "./http.js";
 
-type RouteHandler = (request: IncomingMessage, response: ServerResponse, url: URL, pathMatch: RegExpMatchArray) => Promise<void>;
+type RouteHandler = (request: IncomingMessage, response: ServerResponse, url: URL, pathMatch: RegExpMatchArray, authResult?: AuthResult) => Promise<void>;
 
 interface Route {
     readonly method: string;
@@ -48,8 +48,9 @@ export function createRouter(): Router {
                 const pathMatch = url.pathname.match(route.pattern);
 
                 if (pathMatch && route.method === method) {
+                    let authResult: AuthResult | undefined;
                     if (route.auth === "azureIdentity") {
-                        const authResult = await requireAzureIdentity(request);
+                        authResult = await requireAzureIdentity(request);
                         if (!authResult.authenticated) {
                             console.error(JSON.stringify({
                                 endpoint: `${method} ${url.pathname}`,
@@ -69,7 +70,7 @@ export function createRouter(): Router {
                         }
                     }
 
-                    await route.handler(request, response, url, pathMatch);
+                    await route.handler(request, response, url, pathMatch, authResult);
                     return;
                 }
             }
