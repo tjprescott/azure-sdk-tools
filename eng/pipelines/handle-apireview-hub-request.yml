@@ -5,7 +5,7 @@ pr: none
 trigger: none
 
 variables:
-  callbackTokenAudience: 'api://apireviewhub-staging'
+  callbackTokenAudience: 'api://apireviewhub'
 
 parameters:
   - name: requestMode
@@ -31,7 +31,7 @@ parameters:
     default: ''
   - name: completionCallbackUrl
     type: string
-    default: 'https://api-review-hub-staging.azurewebsites.net/api/operations/'
+    default: 'https://api-review-hub.azurewebsites.net/api/operations/'
   - name: resultArtifactName
     type: string
     default: 'apireview-result'
@@ -193,7 +193,7 @@ jobs:
         displayName: 'Notify API Review Hub of artifact completion'
         condition: succeededOrFailed()
         inputs:
-          azureSubscription: 'API Review Hub Staging'
+          azureSubscription: 'API Review Hub'
           azurePowerShellVersion: latestVersion
           pwsh: true
           ScriptType: InlineScript
